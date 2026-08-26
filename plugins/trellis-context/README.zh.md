@@ -16,7 +16,7 @@ dsh plugin --profile web add /path/to/deepseek-harness/plugins/trellis-context
 dsh --profile web --dump-config
 ```
 
-安装后插件仍处于禁用状态。把仓库根目录的 [`.env.example`](../.env.example) 复制到 DSH 启动目录并设置 `USER_CODE`，再由受信任 profile 用 `enabled: true` 覆盖 `trellis-context` 配置项。运行环境还需要 Git、`bash`、`python3`，并且 shell provider 与 DSH 进程必须看到同一份仓库文件。
+安装后插件仍处于禁用状态。把仓库根目录的 [`.env.example`](../../.env.example) 复制到 DSH 启动目录并设置 `USER_CODE`，再由受信任 profile 用 `enabled: true` 覆盖 `trellis-context` 配置项。运行环境还需要 Git、`bash`、`python3`，并且 shell provider 与 DSH 进程必须看到同一份仓库文件。
 
 ## 配置
 

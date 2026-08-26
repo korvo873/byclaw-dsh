@@ -43,11 +43,11 @@
     "email": "relakkes@gmail.com",
     "url": "https://github.com/NanmiCoder"
   },
-  "homepage": "https://github.com/korvo873/byclaw-dsh/tree/main/agent-teams#readme",
+  "homepage": "https://github.com/korvo873/byclaw-dsh/tree/main/plugins/agent-teams#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/korvo873/byclaw-dsh.git",
-    "directory": "agent-teams"
+    "directory": "plugins/agent-teams"
   },
   "bugs": {
     "url": "https://github.com/korvo873/byclaw-dsh/issues"

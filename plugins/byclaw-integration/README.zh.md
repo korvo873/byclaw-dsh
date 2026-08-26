@@ -18,7 +18,7 @@ dsh plugin --profile web add /path/to/deepseek-harness/plugins/byclaw-integratio
 dsh --profile web --dump-config
 ```
 
-把仓库根目录的 [`.env.example`](../.env.example) 复制到 DSH 启动目录，填写部署值，并确保生成的 `.env` 不被 Git 跟踪。包内 patch 会启用该插件；`USER_CODE`、Redis、ByClaw BE 或所选模型路由无效时，插件启动失败。
+把仓库根目录的 [`.env.example`](../../.env.example) 复制到 DSH 启动目录，填写部署值，并确保生成的 `.env` 不被 Git 跟踪。包内 patch 会启用该插件；`USER_CODE`、Redis、ByClaw BE 或所选模型路由无效时，插件启动失败。
 
 ## 运行结构
 

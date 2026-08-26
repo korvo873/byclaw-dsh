@@ -8,9 +8,9 @@
 
 | 插件 | 包名 | 作用 | 详细文档 |
 | --- | --- | --- | --- |
-| AgentTeams | `@byclaw/dsh-agent-teams` | 创建持久化多 Agent 团队，提供任务 DAG、调度、消息、归档和 Web 活动面板 | [中文](./agent-teams/README.zh.md) · [English](./agent-teams/README.md) |
-| ByClaw Integration | `@byclaw/dsh-integration` | 同步 ByClaw 数字员工、专家团、Skill 和模型，注册 `BYCLAW_DSH` Worker，并映射 DSH 会话事件 | [中文](./byclaw-integration/README.zh.md) · [English](./byclaw-integration/README.md) |
-| Trellis Context | `@byclaw/dsh-trellis-context` | 初始化 Trellis 仓库，并在同一个模型步骤中注入仓库规范、SessionStart 和工作流上下文 | [中文](./trellis-context/README.zh.md) · [English](./trellis-context/README.md) |
+| AgentTeams | `@byclaw/dsh-agent-teams` | 创建持久化多 Agent 团队，提供任务 DAG、调度、消息、归档和 Web 活动面板 | [中文](./plugins/agent-teams/README.zh.md) · [English](./plugins/agent-teams/README.md) |
+| ByClaw Integration | `@byclaw/dsh-integration` | 同步 ByClaw 数字员工、专家团、Skill 和模型，注册 `BYCLAW_DSH` Worker，并映射 DSH 会话事件 | [中文](./plugins/byclaw-integration/README.zh.md) · [English](./plugins/byclaw-integration/README.md) |
+| Trellis Context | `@byclaw/dsh-trellis-context` | 初始化 Trellis 仓库，并在同一个模型步骤中注入仓库规范、SessionStart 和工作流上下文 | [中文](./plugins/trellis-context/README.zh.md) · [English](./plugins/trellis-context/README.md) |
 
 三个包当前都是 DSH 私有工作区包，不发布到 npm registry。它们的 `workspace:` 依赖需要在 DSH 源码工作区中解析，因此应把插件目录放进 `<deepseek-harness>/plugins/` 后安装和构建。
 
@@ -47,9 +47,9 @@ DSH profile
 
 ```sh
 git clone https://github.com/korvo873/byclaw-dsh.git /path/to/byclaw-dsh
-cp -R /path/to/byclaw-dsh/agent-teams /path/to/deepseek-harness/plugins/
-cp -R /path/to/byclaw-dsh/byclaw-integration /path/to/deepseek-harness/plugins/
-cp -R /path/to/byclaw-dsh/trellis-context /path/to/deepseek-harness/plugins/
+cp -R /path/to/byclaw-dsh/plugins/agent-teams /path/to/deepseek-harness/plugins/
+cp -R /path/to/byclaw-dsh/plugins/byclaw-integration /path/to/deepseek-harness/plugins/
+cp -R /path/to/byclaw-dsh/plugins/trellis-context /path/to/deepseek-harness/plugins/
 ```
 
 目标目录已存在时先保留自己的改动，再按 Git diff 合并更新；不要直接覆盖一个有未提交修改的插件目录。
@@ -138,9 +138,9 @@ DSH 启动器读取启动工作目录下的 `.env`；已导出的进程变量优
 
 每个字段的语义、失败条件和限制由各插件 README 维护：
 
-- [AgentTeams 配置与架构](./agent-teams/README.zh.md#配置)
-- [ByClaw Integration 配置与架构](./byclaw-integration/README.zh.md#配置)
-- [Trellis Context 配置与架构](./trellis-context/README.zh.md#配置)
+- [AgentTeams 配置与架构](./plugins/agent-teams/README.zh.md#配置)
+- [ByClaw Integration 配置与架构](./plugins/byclaw-integration/README.zh.md#配置)
+- [Trellis Context 配置与架构](./plugins/trellis-context/README.zh.md#配置)
 
 ## 验证与启动
 

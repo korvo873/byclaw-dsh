@@ -16,7 +16,7 @@ dsh plugin --profile web add /path/to/deepseek-harness/plugins/trellis-context
 dsh --profile web --dump-config
 ```
 
-Installation keeps the plugin disabled. Copy the repository [`.env.example`](../.env.example) to the DSH launch directory, set `USER_CODE`, and override the `trellis-context` row with `enabled: true` in a trusted profile. The runtime also requires Git, `bash`, `python3`, and a shell provider that sees the same repository files as the DSH process.
+Installation keeps the plugin disabled. Copy the repository [`.env.example`](../../.env.example) to the DSH launch directory, set `USER_CODE`, and override the `trellis-context` row with `enabled: true` in a trusted profile. The runtime also requires Git, `bash`, `python3`, and a shell provider that sees the same repository files as the DSH process.
 
 ## Configuration
 

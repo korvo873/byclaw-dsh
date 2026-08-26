@@ -2,11 +2,11 @@
   "name": "@byclaw/dsh-integration",
   "version": "0.1.0",
   "description": "ByClaw resource, Skill, protocol, and BYCLAW_DSH Worker integration for DeepSeek Harness",
-  "homepage": "https://github.com/korvo873/byclaw-dsh/tree/main/byclaw-integration#readme",
+  "homepage": "https://github.com/korvo873/byclaw-dsh/tree/main/plugins/byclaw-integration#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/korvo873/byclaw-dsh.git",
-    "directory": "byclaw-integration"
+    "directory": "plugins/byclaw-integration"
   },
   "bugs": {
     "url": "https://github.com/korvo873/byclaw-dsh/issues"

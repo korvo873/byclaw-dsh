@@ -2,11 +2,11 @@
   "name": "@byclaw/dsh-trellis-context",
   "version": "0.1.0",
   "description": "Trellis initialization and repository context for DeepSeek Harness",
-  "homepage": "https://github.com/korvo873/byclaw-dsh/tree/main/trellis-context#readme",
+  "homepage": "https://github.com/korvo873/byclaw-dsh/tree/main/plugins/trellis-context#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/korvo873/byclaw-dsh.git",
-    "directory": "trellis-context"
+    "directory": "plugins/trellis-context"
   },
   "bugs": {
     "url": "https://github.com/korvo873/byclaw-dsh/issues"

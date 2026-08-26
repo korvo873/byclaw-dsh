@@ -8,9 +8,9 @@ This repository maintains three ByClaw Cordis plugins for [DeepSeek Harness (DSH
 
 | Plugin | Package | Responsibility | Documentation |
 | --- | --- | --- | --- |
-| AgentTeams | `@byclaw/dsh-agent-teams` | Creates durable multi-agent teams with task DAGs, scheduling, messaging, archives, and a Web activity panel | [中文](./agent-teams/README.zh.md) · [English](./agent-teams/README.md) |
-| ByClaw Integration | `@byclaw/dsh-integration` | Synchronizes ByClaw digital employees, expert groups, Skills, and models; registers the `BYCLAW_DSH` Worker; and maps DSH session events | [中文](./byclaw-integration/README.zh.md) · [English](./byclaw-integration/README.md) |
-| Trellis Context | `@byclaw/dsh-trellis-context` | Initializes Trellis repositories and injects repository specifications, SessionStart data, and workflow context into the same model step | [中文](./trellis-context/README.zh.md) · [English](./trellis-context/README.md) |
+| AgentTeams | `@byclaw/dsh-agent-teams` | Creates durable multi-agent teams with task DAGs, scheduling, messaging, archives, and a Web activity panel | [中文](./plugins/agent-teams/README.zh.md) · [English](./plugins/agent-teams/README.md) |
+| ByClaw Integration | `@byclaw/dsh-integration` | Synchronizes ByClaw digital employees, expert groups, Skills, and models; registers the `BYCLAW_DSH` Worker; and maps DSH session events | [中文](./plugins/byclaw-integration/README.zh.md) · [English](./plugins/byclaw-integration/README.md) |
+| Trellis Context | `@byclaw/dsh-trellis-context` | Initializes Trellis repositories and injects repository specifications, SessionStart data, and workflow context into the same model step | [中文](./plugins/trellis-context/README.zh.md) · [English](./plugins/trellis-context/README.md) |
 
 All three packages are private DSH workspace packages and are not published to the npm registry. Their `workspace:` dependencies must resolve inside a DSH source workspace, so place the plugin directories below `<deepseek-harness>/plugins/` before installing and building them.
 
@@ -47,9 +47,9 @@ Install the packages in this order: `agent-teams`, `byclaw-integration`, then `t
 
 ```sh
 git clone https://github.com/korvo873/byclaw-dsh.git /path/to/byclaw-dsh
-cp -R /path/to/byclaw-dsh/agent-teams /path/to/deepseek-harness/plugins/
-cp -R /path/to/byclaw-dsh/byclaw-integration /path/to/deepseek-harness/plugins/
-cp -R /path/to/byclaw-dsh/trellis-context /path/to/deepseek-harness/plugins/
+cp -R /path/to/byclaw-dsh/plugins/agent-teams /path/to/deepseek-harness/plugins/
+cp -R /path/to/byclaw-dsh/plugins/byclaw-integration /path/to/deepseek-harness/plugins/
+cp -R /path/to/byclaw-dsh/plugins/trellis-context /path/to/deepseek-harness/plugins/
 ```
 
 If a destination already exists, preserve its local changes and merge updates with a Git diff. Do not overwrite a plugin directory that contains uncommitted work.
@@ -138,9 +138,9 @@ The expert-group path delegates twice—main agent to leader to member—so `age
 
 Each plugin README owns the detailed field semantics, failure conditions, and limitations:
 
-- [AgentTeams configuration and architecture](./agent-teams/README.zh.md#配置)
-- [ByClaw Integration configuration and architecture](./byclaw-integration/README.zh.md#配置)
-- [Trellis Context configuration and architecture](./trellis-context/README.zh.md#配置)
+- [AgentTeams configuration and architecture](./plugins/agent-teams/README.zh.md#配置)
+- [ByClaw Integration configuration and architecture](./plugins/byclaw-integration/README.zh.md#配置)
+- [Trellis Context configuration and architecture](./plugins/trellis-context/README.zh.md#配置)
 
 ## Verification and startup
 

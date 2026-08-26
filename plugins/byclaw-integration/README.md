@@ -18,7 +18,7 @@ dsh plugin --profile web add /path/to/deepseek-harness/plugins/byclaw-integratio
 dsh --profile web --dump-config
 ```
 
-Copy the repository [`.env.example`](../.env.example) to the DSH launch directory, fill the deployment values, and keep the resulting `.env` untracked. The bundled patch enables this plugin; startup fails when `USER_CODE`, Redis, ByClaw BE, or the selected model route is invalid.
+Copy the repository [`.env.example`](../../.env.example) to the DSH launch directory, fill the deployment values, and keep the resulting `.env` untracked. The bundled patch enables this plugin; startup fails when `USER_CODE`, Redis, ByClaw BE, or the selected model route is invalid.
 
 ## Runtime structure
 
