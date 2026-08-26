@@ -1,0 +1,67 @@
+{
+  "name": "@byclaw/dsh-integration",
+  "version": "0.1.0",
+  "description": "ByClaw resource, Skill, protocol, and BYCLAW_DSH Worker integration for DeepSeek Harness",
+  "homepage": "https://github.com/korvo873/byclaw-dsh/tree/main/byclaw-integration#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/korvo873/byclaw-dsh.git",
+    "directory": "byclaw-integration"
+  },
+  "bugs": {
+    "url": "https://github.com/korvo873/byclaw-dsh/issues"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "cordis.patch.yml", "README.md", "README.zh.md"],
+  "private": true,
+  "engines": { "node": "^22.19.0 || >=24" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify": "pnpm build && node scripts/resources-verify.mjs && node scripts/model-runtime-verify.mjs && node scripts/catalog-skill-verify.mjs && node scripts/worker-verify.mjs"
+  },
+  "dependencies": {
+    "@byclaw/by-framework": "1.5.1",
+    "@earendil-works/pi-ai": "^0.82.1",
+    "@byclaw/dsh-agent-teams": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1-rc.1",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent-presets": "^0.1.0-rc.5",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm-pi-ai": "^0.1.0-rc.5",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-subagent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-todo": "^0.1.0-rc.5",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1-rc.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "workspace:^",
+    "@deepseek-ai/dsh-agent-presets": "workspace:^",
+    "@deepseek-ai/dsh-llm": "workspace:^",
+    "@deepseek-ai/dsh-llm-pi-ai": "workspace:*",
+    "@deepseek-ai/dsh-session": "workspace:^",
+    "@deepseek-ai/dsh-subagent": "workspace:^",
+    "@deepseek-ai/dsh-system-prompt": "workspace:^",
+    "@deepseek-ai/dsh-tool-todo": "workspace:*",
+    "@deepseek-ai/dsh-tools": "workspace:^",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.3"
+  },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

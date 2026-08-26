@@ -1,0 +1,7 @@
+.env
+.DS_Store
+node_modules/
+lib/
+coverage/
+*.tsbuildinfo
+.agent-teams/

@@ -1,0 +1,8 @@
+- insert:
+    - id: byclaw-dsh
+      name: '@byclaw/dsh-integration'
+      config:
+        enabled: true
+        userCode: !!js process.env.USER_CODE
+        baseUrl: 'http://123.56.153.229:8080'
+        stateDir: '.agent-teams'
