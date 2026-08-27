@@ -163,6 +163,7 @@ RUN pnpm dsh plugin --profile web add \
         "await import('file:///home/byclaw/.dsh/profiles/web/node_modules/@byclaw/dsh-trellis/lib/index.js')" \
     && pnpm dsh --profile web --dump-config \
         | tee /tmp/dsh-web-config.yml \
+    && grep -q -- "baseUrl: http://byclaw-be-standalone:8086" /tmp/dsh-web-config.yml \
     && for plugin_id in \
         agent-teams \
         byclaw-dsh \

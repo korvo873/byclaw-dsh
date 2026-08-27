@@ -4,7 +4,7 @@
       config:
         enabled: true
         userCode: !!js process.env.USER_CODE
-        baseUrl: 'http://123.56.153.229:8080'
+        baseUrl: 'http://byclaw-be-standalone:8086'
         stateDir: '.agent-teams'
         provider: 'deepseek-official'
         model: 'deepseek-v4-flash'
