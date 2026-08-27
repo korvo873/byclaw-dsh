@@ -556,7 +556,6 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     const entry = await this.handleFor(command, selection)
     entry.selection.current = selection
     const rootAgent = entry.handle.agent
-    this.ctx.subagents.setSettlementDeliverySuppressed(rootAgent, directTarget !== undefined)
     const sessionWorkspace = ensureByClawSessionWorkspace(rootAgent.session, {
       externalSessionId: route.externalRootSessionId,
       cwd: rootAgent.session.header.cwd ?? resolve(this.options.workspace),
