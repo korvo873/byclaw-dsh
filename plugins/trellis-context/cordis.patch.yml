@@ -1,6 +1,0 @@
-- insert:
-    - id: trellis-context
-      name: '@byclaw/dsh-trellis-context'
-      config:
-        enabled: false
-        userCode: !!js process.env.USER_CODE
