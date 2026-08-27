@@ -132,6 +132,7 @@ WORKDIR /workspace
 RUN pnpm config set registry "${NPM_CONFIG_REGISTRY}" \
     && pnpm install --no-frozen-lockfile \
     && pnpm run build \
+    && pnpm --filter @byclaw/dsh-trellis run test \
     && pnpm --filter @byclaw/dsh-agent-teams run build \
     && pnpm --filter @byclaw/dsh-integration run build \
     && pnpm --filter @byclaw/dsh-better-sidebar run build \
@@ -146,6 +147,9 @@ RUN pnpm dsh plugin --profile web add \
         /workspace/plugins/dsh-better-sidebar \
         /workspace/plugins/dsh-diff-viewer \
         /workspace/plugins/dsh-codegraph \
+    && test -f /home/byclaw/.dsh/profiles/web/node_modules/@byclaw/dsh-trellis/lib/index.js \
+    && node --input-type=module --eval \
+        "await import('file:///home/byclaw/.dsh/profiles/web/node_modules/@byclaw/dsh-trellis/lib/index.js')" \
     && pnpm dsh --profile web --dump-config \
         | tee /tmp/dsh-web-config.yml \
     && for plugin_id in \

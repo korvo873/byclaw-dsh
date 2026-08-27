@@ -2,6 +2,8 @@
 .DS_Store
 node_modules/
 lib/
+!plugins/dsh-trellis/lib/
+!plugins/dsh-trellis/lib/**
 coverage/
 *.tsbuildinfo
 .agent-teams/
