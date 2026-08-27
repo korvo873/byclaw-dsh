@@ -1,12 +1,10 @@
-# dsh 基础开发环境
-FROM ubuntu:24.04
+# --- 基础阶段：安装各阶段共用的开发工具链 ---
+FROM python:3.12-slim AS base
 
 ARG NVM_VERSION=0.40.3
 ARG NODE_VERSION=22.19.0
 ARG PNPM_VERSION=11.7.0
-ARG DSH_REPOSITORY=https://github.com/deepseek-ai/deepseek-harness.git
-ARG DSH_REF=master
-# 基础镜像尚未安装 ca-certificates，先用 HTTP 引导安装证书；APT 仍校验仓库签名。
+# Python slim 基于 Debian；先使用 HTTP 阿里云镜像安装 ca-certificates，APT 仍校验仓库签名。
 ARG APT_MIRROR=http://mirrors.aliyun.com
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -28,26 +26,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN groupadd --gid 1001 byclaw \
     && useradd --uid 1001 --gid byclaw --create-home --shell /bin/bash byclaw
 
-# 安装系统工具、Python 3.12、JDK 21 和 Maven
-# Ubuntu arm64 使用 ubuntu-ports，amd64 使用 ubuntu；两者都切到国内镜像。
+# 安装系统工具、JDK 21 和 Maven；Python 3.12 由基础镜像提供。
 RUN set -eux; \
-    architecture="$(dpkg --print-architecture)"; \
-    case "${architecture}" in \
-        arm64|armhf|ppc64el|riscv64|s390x) \
-            sed -i -E "s|https?://ports.ubuntu.com/ubuntu-ports|${APT_MIRROR}/ubuntu-ports|g" \
-                /etc/apt/sources.list.d/ubuntu.sources \
-            ;; \
-        amd64|i386) \
-            sed -i -E \
-                -e "s|https?://archive.ubuntu.com/ubuntu|${APT_MIRROR}/ubuntu|g" \
-                -e "s|https?://security.ubuntu.com/ubuntu|${APT_MIRROR}/ubuntu|g" \
-                /etc/apt/sources.list.d/ubuntu.sources \
-            ;; \
-        *) \
-            echo "Unsupported architecture: ${architecture}" >&2; \
-            exit 1 \
-            ;; \
-    esac; \
+    sed -i -E \
+        -e "s|https?://deb.debian.org|${APT_MIRROR}|g" \
+        -e "s|https?://security.debian.org|${APT_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources; \
     apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
@@ -66,10 +50,6 @@ RUN set -eux; \
         pkg-config \
         procps \
         psmisc \
-        python-is-python3 \
-        python3 \
-        python3-pip \
-        python3-venv \
         ripgrep \
         rsync \
         sqlite3 \
@@ -90,15 +70,42 @@ RUN printf '%s\n' \
         'timeout = 120' \
         > /etc/pip.conf
 
-# 系统级安装 NVM，并预装默认 Node.js 与 pnpm
-RUN git clone --depth 1 --branch "v${NVM_VERSION}" \
-        https://github.com/nvm-sh/nvm.git "${NVM_DIR}" \
-    && chown -R byclaw:byclaw "${NVM_DIR}" \
-    && . "${NVM_DIR}/nvm.sh" \
+ARG NVM_SOURCE_BASE=https://cdn.jsdelivr.net/gh/nvm-sh/nvm
+ARG NVM_SH_SHA256=390260ab9eb1da20e8bc0ebea2ee90f528d53e5e9f6e13b16717db4af454df9d
+ARG NVM_EXEC_SHA256=e6b7a2bafac6994e1ba14282cff82c75476fba0788f68a9ecf558dfdf3331621
+ARG NVM_BASH_COMPLETION_SHA256=b7eb3bf03d59b61e451957b020640aa55fe8bf47fb39d85d244e259f445d2fbe
+
+# 从 CDN 下载固定版本的 NVM 必需文件，避免通过 Git 安装
+RUN set -eux; \
+    mkdir -p "${NVM_DIR}"; \
+    for file_spec in \
+        "nvm.sh:${NVM_SH_SHA256}" \
+        "nvm-exec:${NVM_EXEC_SHA256}" \
+        "bash_completion:${NVM_BASH_COMPLETION_SHA256}"; do \
+        file_name="${file_spec%%:*}"; \
+        file_sha256="${file_spec#*:}"; \
+        curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            --connect-timeout 10 \
+            --max-time 120 \
+            "${NVM_SOURCE_BASE}@v${NVM_VERSION}/${file_name}" \
+            -o "${NVM_DIR}/${file_name}"; \
+        echo "${file_sha256}  ${NVM_DIR}/${file_name}" | sha256sum -c -; \
+    done; \
+    chmod 0755 "${NVM_DIR}/nvm-exec"
+
+# 单独安装 Node.js，下载失败时不会使 NVM 源码层失效
+RUN . "${NVM_DIR}/nvm.sh" \
     && nvm install "${NODE_VERSION}" \
     && nvm alias default "${NODE_VERSION}" \
-    && ln -s "${NVM_DIR}/versions/node/v${NODE_VERSION}" "${NVM_DIR}/current" \
-    && npm install --global \
+    && ln -s "${NVM_DIR}/versions/node/v${NODE_VERSION}" "${NVM_DIR}/current"
+
+# node-gyp 直接使用 Node 发行包内置 headers，避免回源 nodejs.org
+ENV npm_config_nodedir=/opt/nvm/current
+
+# 全局 Node.js 工具独立成层，便于定位并缓存 npm 下载
+RUN npm install --global \
         "pnpm@${PNPM_VERSION}" \
         @colbymchenry/codegraph@1.6.0 \
     && npm cache clean --force \
@@ -110,13 +117,17 @@ RUN printf '%s\n' \
         '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' \
         '[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"' \
         > /etc/profile.d/nvm.sh \
-    && chmod 0644 /etc/profile.d/nvm.sh \
-    && mkdir -p /workspace \
-    && chown -R byclaw:byclaw /workspace
+    && chmod 0644 /etc/profile.d/nvm.sh
+
+
+# --- 构建阶段：安装依赖、编译 DSH 与 ByClaw 插件 ---
+FROM base AS builder
+
+ARG DSH_REPOSITORY=https://githubfast.com/deepseek-ai/deepseek-harness.git
+ARG DSH_REF=master
 
 # 拉取 DSH 源码工作区；插件的 workspace:* 依赖必须在该 workspace 中解析
-RUN rmdir /workspace \
-    && git clone --depth 1 --branch "${DSH_REF}" "${DSH_REPOSITORY}" /workspace
+RUN git clone --depth 1 --branch "${DSH_REF}" "${DSH_REPOSITORY}" /workspace
 
 # 将本项目维护的插件复制到 DSH 工作区
 COPY --chown=byclaw:byclaw plugins/ /workspace/plugins/
@@ -164,6 +175,14 @@ RUN pnpm dsh plugin --profile web add \
     done \
     && rm -f /tmp/dsh-web-config.yml
 
+
+# --- 运行阶段：只接收构建结果与运行配置 ---
+FROM base AS runtime
+
+WORKDIR /workspace
+
+COPY --from=builder --chown=byclaw:byclaw /workspace /workspace
+COPY --from=builder --chown=byclaw:byclaw /home/byclaw/.dsh /home/byclaw/.dsh
 COPY --chown=byclaw:byclaw docker-entrypoint.sh /usr/local/bin/byclaw-dsh-entrypoint
 RUN chmod 0755 /usr/local/bin/byclaw-dsh-entrypoint \
     && chown -R byclaw:byclaw /workspace /home/byclaw/.dsh
