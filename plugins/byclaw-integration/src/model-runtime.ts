@@ -7,6 +7,8 @@ import { resolveRetryPolicy, type AdapterRegistrationHandle, type LlmAdapter } f
 import { PiAiAdapter, type ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import {
   createProvider,
+  defaultProviderAuthContext,
+  InMemoryCredentialStore,
   type Api,
   type Model,
   type ModelThinkingLevel,
@@ -27,6 +29,9 @@ export const BYCLAW_REDIS_MODEL_ENABLED_ENV = 'BYCLAW_REDIS_MODEL_ENABLED'
 const DEFAULT_CONTEXT_WINDOW = 128_000
 const DEFAULT_MAX_TOKENS = 8_192
 const DEFAULT_IDLE_TIMEOUT_SECONDS = 600
+const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
+const DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET = 2048 * 2048
+const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
 const PROVIDER_PREFIX = 'baiying-m-'
 
 type ByClawModelProtocol = 'openai-completions' | 'openai-responses' | 'anthropic-messages'
@@ -281,6 +286,9 @@ function materialize(raw: AiModelRecord, modelId: string, resolution: 'explicit'
     defaultMaxTokens: maxTokens,
     defaultInput: input,
     streamIdleTimeoutMs: idleTimeoutMs(),
+    maxRequestImageBytes: DEFAULT_MAX_REQUEST_IMAGE_BYTES,
+    requestImagePixelBudget: DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET,
+    requestImageMaxBytes: DEFAULT_REQUEST_IMAGE_MAX_BYTES,
     retryPolicy: retryPolicy(instanceParam, route),
     piProvider,
     configuredMaxTokens: new Map([[modelCode, maxTokens]]),
@@ -348,6 +356,10 @@ export class ByClawDynamicModelRuntime {
     this.adapter = new PiAiAdapter({
       profiles: () => this.profiles,
       resolveApiKey: async (_provider, profile) => this.tokens.get(profile),
+      auth: {
+        credentials: new InMemoryCredentialStore(),
+        authContext: defaultProviderAuthContext(),
+      },
     })
   }
 

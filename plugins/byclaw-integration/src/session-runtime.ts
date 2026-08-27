@@ -3,7 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session, type SessionEvent, type TodoItem } from '@deepseek-ai/dsh-session'
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import * as ToolTodo from '@deepseek-ai/dsh-tool-todo'
@@ -24,9 +24,11 @@ import {
 } from '@byclaw/dsh-agent-teams/snapshot'
 import type { ByClawDshSessionPort } from './worker.ts'
 import { readAgentTemplateSync } from './agent-template.ts'
+import type { ByClawInboundTarget } from './inbound-routing.ts'
+import type { ByClawTemplateInstanceRuntime } from './template-runtime.ts'
 import {
-  byClawCodeGraphToolNames,
-  byClawInboundPrompt,
+  appendByClawInboundUserMessage,
+  byClawInboundText,
   ensureByClawSessionWorkspace,
   registerByClawAgentWorkspacePolicy,
 } from './session-workspace.ts'
@@ -52,6 +54,8 @@ export interface ByClawDshSessionRuntimeOptions {
   rosterPrompt: string | (() => string)
   sourceAgentType: string
   emitter: GatewayDataEmitter
+  resolveInboundTarget?: (command: AskAgentCommand, text: string) => ByClawInboundTarget | undefined
+  templateRuntime?: ByClawTemplateInstanceRuntime
 }
 
 interface ActiveTurn {
@@ -62,11 +66,22 @@ interface ActiveTurn {
   rootSessionId: string
   responseSessionId: string
   rootMessageId: string
+  direct: boolean
   announcedChildren: Set<string>
   emittedTeamSnapshots: Set<string>
   bufferedReasoning: Map<string, { sequence: number; text: string }>
   bufferedChildOutput: Map<string, { sequence: number; text: string }>
   toolNames: Map<string, string>
+}
+
+/** Prevent a direct ByClaw turn from waking the main Agent on child settlement. */
+export function shouldSuppressDirectSettlement(
+  direct: boolean,
+  messages: readonly UserMessage[],
+): boolean {
+  return direct
+    && messages.length > 0
+    && messages.every(message => message.source.kind === 'subagent-settled')
 }
 
 interface RootHandle {
@@ -121,10 +136,33 @@ function assertStableSessionCwd(
   )
 }
 
-/** Build the durable DSH root identity for one ByClaw conversation. */
+/**
+ * Keep the durable DSH root identity equal to ByClaw's inbound session id.
+ *
+ * ByClaw already owns the conversation namespace, so hashing it here only
+ * makes cross-system tracing and resume unnecessarily difficult. The user
+ * code remains part of the in-process handle map and Worker AgentType.
+ */
 export function byClawRootSessionId(externalSessionId: string, userCode: string): SessionId {
-  const suffix = createHash('sha256').update(userCode).update('\0').update(externalSessionId).digest('hex').slice(0, 32)
-  return SessionId(`byclaw-dsh-v2-${suffix}`)
+  void userCode
+  return SessionId(externalSessionId)
+}
+
+/** Build a stable child identity for one direct ByClaw resource conversation. */
+export function byClawDirectTemplateSessionId(
+  userCode: string,
+  externalSessionId: string,
+  templateId: string,
+): SessionId {
+  const suffix = createHash('sha256')
+    .update(userCode)
+    .update('\0')
+    .update(externalSessionId)
+    .update('\0')
+    .update(templateId)
+    .digest('hex')
+    .slice(0, 32)
+  return SessionId(`byclaw-dsh-direct-v1-${suffix}`)
 }
 
 /** Decide whether a ByClaw root Agent is reused, resumed, or created. */
@@ -496,6 +534,16 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
 
   private async performAsk(command: AskAgentCommand, context: AgentContext): Promise<{ answer: string; dshSessionId: string }> {
     const route = byClawCommandSessionRoute(command)
+    const text = extractByClawUserText(command.content)
+    const directTarget = route.targetDshSessionId === undefined
+      ? this.options.resolveInboundTarget?.(command, text)
+      : undefined
+    if (directTarget?.text.trim() === '') {
+      throw new Error(`ByClaw direct target "${directTarget.name}" requires a non-empty task`)
+    }
+    const directChildSessionId = directTarget === undefined
+      ? undefined
+      : byClawDirectTemplateSessionId(command.header.userCode, route.externalRootSessionId, directTarget.templateId)
     console.info(
       `[byclaw-dsh] 📥 收到命令: type=AskAgentCommand, message_id=${command.header.messageId}, trace_id=${context.traceId}, session_id=${command.header.sessionId}`,
     )
@@ -508,17 +556,13 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     const entry = await this.handleFor(command, selection)
     entry.selection.current = selection
     const rootAgent = entry.handle.agent
-    const text = extractByClawUserText(command.content)
+    this.ctx.subagents.setSettlementDeliverySuppressed(rootAgent, directTarget !== undefined)
     const sessionWorkspace = ensureByClawSessionWorkspace(rootAgent.session, {
       externalSessionId: route.externalRootSessionId,
       cwd: rootAgent.session.header.cwd ?? resolve(this.options.workspace),
     })
-    const codeGraphTools = byClawCodeGraphToolNames(rootAgent)
     console.info(
       `[byclaw-dsh] 🧭 会话空间 (session=${route.externalRootSessionId}, dsh_session=${rootAgent.id}, cwd=${sessionWorkspace.cwd}, scope=root)`,
-    )
-    console.info(
-      `[byclaw-dsh] 🧩 运行能力 (session=${route.externalRootSessionId}, dsh_session=${rootAgent.id}, CodeGraph=${codeGraphTools.length === 0 ? 'disabled' : `enabled:${codeGraphTools.length}`})`,
     )
     const sessionAction = entry.mode === 'create' ? '🆕 新会话' : entry.mode === 'resume' ? '♻️ 恢复会话' : '🔁 继续会话'
     console.info(
@@ -530,7 +574,12 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     console.info(
       `[byclaw-dsh] 🚀 启动任务 (session=${command.header.sessionId}, cwd=${rootAgent.session.header.cwd}): ${logText(text)}`,
     )
-    const responseSessionId = route.targetDshSessionId ?? String(rootAgent.id)
+    const responseSessionId = String(directChildSessionId ?? route.targetDshSessionId ?? rootAgent.id)
+    if (directTarget !== undefined && directChildSessionId !== undefined) {
+      console.info(
+        `[byclaw-dsh] 🎯 入站直达 (resource=${directTarget.resourceId}, kind=${directTarget.kind}, template=${directTarget.templateId}, dsh_session=${directChildSessionId}, scope=direct)`,
+      )
+    }
     const turn: ActiveTurn = {
       context,
       answer: '',
@@ -539,6 +588,7 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
       rootSessionId: String(rootAgent.id),
       responseSessionId,
       rootMessageId: command.header.messageId,
+      direct: directTarget !== undefined,
       announcedChildren: new Set(),
       emittedTeamSnapshots: new Set(),
       bufferedReasoning: new Map(),
@@ -547,7 +597,10 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     }
     this.active.set(String(rootAgent.id), turn)
     try {
-      const agent = await this.deliverToSelectedAgent(rootAgent, route, byClawInboundPrompt(sessionWorkspace, text))
+      if (directTarget !== undefined) appendByClawInboundUserMessage(rootAgent.session, text)
+      const agent = directTarget === undefined
+        ? await this.deliverToSelectedAgent(rootAgent, route, byClawInboundText(text))
+        : await this.deliverToInboundTarget(rootAgent, directTarget, directChildSessionId as SessionId)
       this.messageAgents.set(command.header.messageId, agent)
       await agent.whenIdle()
       await turn.forwarding
@@ -556,7 +609,13 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
       if (turn.teamGate.failure !== undefined) throw new Error(`DSH async settlement failed: ${turn.teamGate.failure}`)
       const failure = turnFailureMessage(agent.session.events)
       if (failure !== undefined) throw new Error(`DSH turn failed: ${failure}`)
-      return { answer: turn.answer || this.lastAssistantText(agent), dshSessionId: String(agent.id) }
+      return {
+        answer: turn.answer || this.lastAssistantText(agent),
+        // The ByClaw-facing DSH session is always the inbound conversation.
+        // Direct target children retain their own internal ids for lineage and
+        // event projection, but callers resume by the ByClaw session id.
+        dshSessionId: route.externalRootSessionId,
+      }
     } finally {
       this.active.delete(String(rootAgent.id))
       this.messageAgents.delete(command.header.messageId)
@@ -596,6 +655,23 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     return target
   }
 
+  private async deliverToInboundTarget(
+    rootAgent: Agent,
+    target: ByClawInboundTarget,
+    childSessionId: SessionId,
+  ): Promise<Agent> {
+    if (this.options.templateRuntime === undefined) {
+      throw new Error('ByClaw direct template routing is not configured')
+    }
+    return this.options.templateRuntime.deliver(
+      rootAgent,
+      target.templateId,
+      target.text,
+      childSessionId,
+      new AbortController().signal,
+    )
+  }
+
   private async handleFor(command: AskAgentCommand, selected: ModelSelection): Promise<RootHandle> {
     const route = byClawCommandSessionRoute(command)
     const externalRootSessionId = route.externalRootSessionId
@@ -612,6 +688,12 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
         installModelSelection(agentCtx, selection)
         installByClawTaskPlanTool(agentCtx)
         registerByClawAgentWorkspacePolicy(agentCtx)
+        agentCtx.on('agent/pre-step', ({ agent, messages }, next) => {
+          const active = this.activeTurnFor(agent.session)
+          return shouldSuppressDirectSettlement(active?.direct === true, messages)
+            ? Promise.resolve({ kind: 'reject' as const })
+            : next()
+        })
         agentCtx.systemPrompt.section({
           name: 'byclaw-dsh:authorized-resources',
           order: 116,

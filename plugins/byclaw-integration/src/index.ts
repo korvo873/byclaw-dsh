@@ -25,6 +25,8 @@ import {
 } from './protocol.ts'
 import { ByClawDshSessionRuntime } from './session-runtime.ts'
 import { registerAgentTemplateRuntime } from './template-runtime.ts'
+import { resolveByClawInboundTarget } from './inbound-routing.ts'
+import { registerByClawSessionEventType } from './session-workspace.ts'
 import { ByClawDshWorkerRuntime } from './worker-runtime.ts'
 import {
   BYCLAW_REDIS_MODEL_ENABLED_ENV,
@@ -35,6 +37,7 @@ import {
 export { BYCLAW_DSH_AGENT_TYPE, DEFAULT_BYCLAW_BE_BASE_URL }
 export * from './types.ts'
 export * from './session-workspace.ts'
+export * from './inbound-routing.ts'
 export {
   BYCLAW_REDIS_MODEL_ENABLED_ENV,
   ByClawDynamicModelRuntime,
@@ -181,6 +184,7 @@ export function resolveWorkerAgentTypes(configured: readonly string[] | undefine
 /** Activate resource synchronization and the by-framework Worker. */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   if (config.enabled !== true) return
+  registerByClawSessionEventType()
   const userCode = config.userCode?.trim() || process.env['USER_CODE']?.trim()
   if (userCode === undefined || userCode === '') throw new Error('byclaw-dsh requires config.userCode or USER_CODE')
   const baseUrl = config.baseUrl?.trim() || DEFAULT_BYCLAW_BE_BASE_URL
@@ -276,7 +280,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     resources = await synchronize()
     ctx.logger.info(`byclaw-dsh cold-start synchronization complete: employees=${resources.employees.length}; groups=${resources.groups.length}`)
 
-    registerAgentTemplateRuntime(ctx, {
+    const templateRuntime = registerAgentTemplateRuntime(ctx, {
       catalogDir: agentTemplateDir,
       subagentProvider: config.subagentProvider ?? 'spawn',
       resolveModel: (bindingId, modelId) => models.resolve(bindingId, modelId),
@@ -312,6 +316,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       rosterPrompt: () => rosterPrompt(resources),
       sourceAgentType,
       emitter,
+      resolveInboundTarget: (command, text) => resolveByClawInboundTarget(resources, command.extraPayload, text),
+      templateRuntime,
     })
     const id = workerId(config.workerId, userCode)
     worker = new ByClawDshWorkerRuntime({

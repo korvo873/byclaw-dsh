@@ -16,6 +16,7 @@ import * as dshProtocol from '../lib/protocol.js'
 import {
   ByClawAsyncTeamGate,
   ByClawDshSessionRuntime,
+  byClawDirectTemplateSessionId,
   byClawCommandSessionRoute,
   byClawRootSessionId,
   dshChildLabel,
@@ -23,10 +24,11 @@ import {
   installByClawTaskPlanTool,
   shouldForwardIncrementalChunk,
   resolveRootSessionOpenMode,
+  shouldSuppressDirectSettlement,
   turnFailureMessage,
 } from '../lib/session-runtime.js'
 import { Config, resolveWorkerAgentTypes, rosterPrompt } from '../lib/index.js'
-import { concludeParentForTemplateInstance } from '../lib/template-runtime.js'
+import * as templateRuntime from '../lib/template-runtime.js'
 import { superviseWorker } from '../lib/worker-runtime.js'
 import { ByClawDshCommandHandler } from '../lib/worker.js'
 
@@ -106,8 +108,8 @@ await taskPlanAlias.execute({ todos: [
 if (taskPlanEvents[1]?.type !== 'todo/write' || taskPlanEvents[1]?.data.todos[0]?.content !== '兼容工具项') {
   throw new Error('ByClaw task_plan compatibility alias did not append a task-plan event')
 }
-if (!String(byClawRootSessionId('external-session', 'adminvip')).startsWith('byclaw-dsh-v2-')) {
-  throw new Error('ByClaw root session identity does not isolate pre-takeover sessions')
+if (byClawRootSessionId('external-session', 'adminvip') !== 'external-session') {
+  throw new Error('ByClaw root session identity is not the inbound session id')
 }
 if (resolveRootSessionOpenMode(true, true) !== 'reuse'
   || resolveRootSessionOpenMode(false, true) !== 'resume'
@@ -116,6 +118,11 @@ if (resolveRootSessionOpenMode(true, true) !== 'reuse'
 }
 if (shouldForwardIncrementalChunk('reasoning') || !shouldForwardIncrementalChunk('answer')) {
   throw new Error('DSH reasoning chunks must be aggregated while answer chunks remain incremental')
+}
+if (!shouldSuppressDirectSettlement(true, [{ source: { kind: 'subagent-settled' } }])
+  || shouldSuppressDirectSettlement(false, [{ source: { kind: 'subagent-settled' } }])
+  || shouldSuppressDirectSettlement(true, [{ source: { kind: 'user' } }])) {
+  throw new Error('direct ByClaw turns must suppress only settlement-only parent wakeups')
 }
 if (dshChildLabel('agent-teams:rd-team:架构舵手', '/missing') !== '架构舵手') {
   throw new Error('AgentTeams member descriptor did not produce the visible member name')
@@ -259,6 +266,16 @@ if (!routingPrompt.includes('single employee is one ordinary child Agent')
   || !routingPrompt.includes('删除运行团队不删除 DSH 父子会话历史')) {
   throw new Error('template/team/session separation policy is absent from the main-agent prompt')
 }
+const directChildId = byClawDirectTemplateSessionId('adminvip', 'external-session', 'byclaw-employee-20010801')
+if (directChildId !== byClawDirectTemplateSessionId('adminvip', 'external-session', 'byclaw-employee-20010801')
+  || directChildId === byClawDirectTemplateSessionId('adminvip', 'external-session', 'byclaw-group-20010819')
+  || directChildId === byClawDirectTemplateSessionId('other-user', 'external-session', 'byclaw-employee-20010801')) {
+  throw new Error('direct template child session identity is not stable and isolated')
+}
+if (typeof templateRuntime.byClawTemplateUserText !== 'function'
+  || templateRuntime.byClawTemplateUserText('  做自我介绍  ') !== '做自我介绍') {
+  throw new Error('template instance user message is not the unchanged business task')
+}
 const supervisorAbort = new AbortController()
 let runnerStarts = 0
 await superviseWorker(() => ({
@@ -270,7 +287,7 @@ await superviseWorker(() => ({
 }), supervisorAbort.signal, 0)
 if (runnerStarts !== 2) throw new Error('Worker supervisor did not restart an unexpectedly exited runner')
 let templateConclusions = 0
-concludeParentForTemplateInstance({ concludeTurn() { templateConclusions += 1 } })
+templateRuntime.concludeParentForTemplateInstance({ concludeTurn() { templateConclusions += 1 } })
 if (templateConclusions !== 1) {
   throw new Error('template dispatch did not conclude its successful tool result')
 }

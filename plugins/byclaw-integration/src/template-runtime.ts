@@ -3,6 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -10,7 +11,6 @@ import { dirname, join } from 'node:path'
 import { readAgentTemplate, readAgentTemplateSync, type DshAgentTemplate } from './agent-template.ts'
 import type { GenerationLease } from './generation-lease.ts'
 import {
-  byClawCodeGraphToolNames,
   ensureByClawSessionWorkspace,
   foldByClawSessionWorkspace,
   registerByClawAgentWorkspacePolicy,
@@ -98,12 +98,11 @@ function templateIdFromLabel(label: string): string | undefined {
   return separator < 1 ? undefined : suffix.slice(0, separator)
 }
 
-function delegatedTask(parent: Agent, task: string): string {
-  const cwd = parent.session.header.cwd
-  const workspace = cwd === undefined
-    ? ''
-    : ['<delegation-workspace>', `cwd: ${cwd}`, '</delegation-workspace>', ''].join('\n')
-  return `${workspace}Delegated task from your direct parent:\n\n${task}`
+/** Return the exact business text shown as the template instance's user message. */
+export function byClawTemplateUserText(task: string): string {
+  const text = task.trim()
+  if (text === '') throw new Error('delegated template task must not be empty')
+  return text
 }
 
 /** End a successful asynchronous template dispatch without aborting its tool result. */
@@ -111,6 +110,25 @@ export function concludeParentForTemplateInstance(
   exec: Pick<ToolRunContext, 'concludeTurn'>,
 ): void {
   exec.concludeTurn()
+}
+
+export interface ByClawTemplateInstanceRuntime {
+  /** Start a new template child with a caller-owned deterministic child id. */
+  instantiate(
+    parent: Agent,
+    templateId: string,
+    task: string,
+    signal: AbortSignal,
+    childId?: SessionId,
+  ): Promise<{ childId: SessionId; agent: Agent }>
+  /** Follow an existing template child, cold-resuming it when persistence owns it. */
+  deliver(
+    parent: Agent,
+    templateId: string,
+    task: string,
+    childId: SessionId,
+    signal: AbortSignal,
+  ): Promise<Agent>
 }
 
 /** Install child composition and the model-facing template-instantiation tool. */
@@ -122,7 +140,7 @@ export function registerAgentTemplateRuntime(ctx: Context, config: {
   generationLease?: GenerationLease
   generationCatalogDir?: string
   maxDepth?: number
-}): void {
+}): ByClawTemplateInstanceRuntime {
   const pending = new Map<string, DshAgentTemplate>()
   const pendingModels = new Map<string, ModelSelection>()
   ctx.subagents.registerContinuableSetup((childCtx) => {
@@ -136,12 +154,8 @@ export function registerAgentTemplateRuntime(ctx: Context, config: {
       ? () => undefined
       : (() => {
           ensureByClawSessionWorkspace(child.session, inheritedWorkspace)
-          const codeGraphTools = byClawCodeGraphToolNames(child)
           console.info(
             `[byclaw-dsh] 🧭 会话空间 (session=${inheritedWorkspace.externalSessionId}, dsh_session=${child.id}, cwd=${inheritedWorkspace.cwd}, scope=delegated)`,
-          )
-          console.info(
-            `[byclaw-dsh] 🧩 运行能力 (session=${inheritedWorkspace.externalSessionId}, dsh_session=${child.id}, CodeGraph=${codeGraphTools.length === 0 ? 'disabled' : `enabled:${codeGraphTools.length}`})`,
           )
           return registerByClawAgentWorkspacePolicy(childCtx)
         })()
@@ -175,6 +189,82 @@ export function registerAgentTemplateRuntime(ctx: Context, config: {
     }
   })
 
+  const withCatalogRead = async <T>(operation: () => Promise<T>): Promise<T> => {
+    if (config.generationLease === undefined || config.generationCatalogDir === undefined) return operation()
+    return config.generationLease.read(config.generationCatalogDir, operation)
+  }
+
+  const startTemplate = async (
+    parent: Agent,
+    templateId: string,
+    task: string,
+    signal: AbortSignal,
+    childId?: SessionId,
+    refresh = true,
+  ): Promise<{ childId: SessionId; agent: Agent }> => {
+    if (refresh) await config.beforeInstantiate?.()
+    return withCatalogRead(async () => {
+    const userText = byClawTemplateUserText(task)
+    const template = await readAgentTemplate(config.catalogDir, templateId)
+    if (template === undefined) throw new Error(`agent template "${templateId}" was not found`)
+    if (!template.source.directlyAuthorized && template.kind === 'agent') {
+      throw new Error(`agent template "${templateId}" is available only through its authorized expert team`)
+    }
+    const selection = await config.resolveModel(`template:${template.id}`, template.source.modelId)
+    const label = `${TEMPLATE_LABEL_PREFIX}${template.id}:${randomUUID()}`
+    pending.set(label, template)
+    pendingModels.set(label, selection)
+    try {
+      const started = await ctx.subagents.startContinuable({
+        provider: config.subagentProvider,
+        label,
+        ...childId === undefined ? {} : { childId },
+        request: {
+          prompt: [{ type: 'text', text: userText }],
+          parent,
+          persona: template.persona,
+          agentOptions: {
+            provider: selection.provider,
+            model: selection.model,
+          },
+          ...config.maxDepth === undefined ? {} : { maxDepth: config.maxDepth },
+        },
+        signal,
+      })
+      const agent = ctx.agents.get(started.childId)
+      if (agent === undefined) throw new Error(`template child "${started.childId}" was accepted but is not live`)
+      return { childId: started.childId, agent }
+    } finally {
+      pending.delete(label)
+      pendingModels.delete(label)
+    }
+    })
+  }
+
+  const runtime: ByClawTemplateInstanceRuntime = {
+    instantiate: startTemplate,
+    async deliver(parent, templateId, task, childId, signal): Promise<Agent> {
+      const persistence = (ctx as Context & {
+        sessionPersistence: { list(): Promise<ReadonlyArray<{ id: string }>> }
+      }).sessionPersistence
+      const existing = ctx.agents.get(childId)
+      const persisted = existing !== undefined || (await persistence.list()).some(entry => entry.id === String(childId))
+      if (!persisted) return (await startTemplate(parent, templateId, task, signal, childId, false)).agent
+      return withCatalogRead(async () => {
+        const userText = byClawTemplateUserText(task)
+        await ctx.subagents.followup(
+          parent,
+          childId,
+          [{ type: 'text', text: userText }],
+          { source: { kind: 'user' }, signal },
+        )
+        const target = ctx.agents.get(childId)
+        if (target === undefined) throw new Error(`template child "${childId}" was accepted but is not live`)
+        return target
+      })
+    },
+  }
+
   ctx.tools.register(defineTool({
     name: 'byclaw_instantiate_template',
     description: 'Instantiate one authorized DSH agent template as a durable child Agent and delegate a task. A single digital employee never creates AgentTeams; an expert-team template creates its own leader child, and that leader orchestrates its configured roster. This call concludes the dispatch turn; the child report wakes the parent asynchronously.',
@@ -197,49 +287,17 @@ export function registerAgentTemplateRuntime(ctx: Context, config: {
     async execute(args, exec) {
       const parent = exec.agent
       if (parent === undefined) throw new Error('byclaw_instantiate_template requires a calling Agent')
-      await config.beforeInstantiate?.()
-      const task = args.task.trim()
-      if (task === '') throw new Error('delegated template task must not be empty')
-      const instantiate = async () => {
-        const template = await readAgentTemplate(config.catalogDir, args.template_id)
-        if (template === undefined) throw new Error(`agent template "${args.template_id}" was not found`)
-        if (!template.source.directlyAuthorized && template.kind === 'agent') {
-          throw new Error(`agent template "${args.template_id}" is available only through its authorized expert team`)
-        }
-        const selection = await config.resolveModel(`template:${template.id}`, template.source.modelId)
-        const label = `${TEMPLATE_LABEL_PREFIX}${template.id}:${randomUUID()}`
-        pending.set(label, template)
-        pendingModels.set(label, selection)
-        try {
-          const started = await ctx.subagents.startContinuable({
-            provider: config.subagentProvider,
-            label,
-            request: {
-              prompt: [{ type: 'text', text: delegatedTask(parent, task) }],
-              parent,
-              persona: template.persona,
-              agentOptions: {
-                provider: selection.provider,
-                model: selection.model,
-              },
-              ...config.maxDepth === undefined ? {} : { maxDepth: config.maxDepth },
-            },
-            signal: exec.signal,
-          })
-          concludeParentForTemplateInstance(exec)
-          return {
-            template_id: template.id,
-            instance_session_id: String(started.childId),
-            instance_kind: template.kind,
-            status: 'running',
-          }
-        } finally {
-          pending.delete(label)
-          pendingModels.delete(label)
-        }
+      const task = byClawTemplateUserText(args.task)
+      const started = await runtime.instantiate(parent, args.template_id, task, exec.signal)
+      concludeParentForTemplateInstance(exec)
+      const template = readAgentTemplateSync(config.catalogDir, args.template_id)
+      return {
+        template_id: args.template_id,
+        instance_session_id: String(started.childId),
+        instance_kind: template?.kind ?? 'agent',
+        status: 'running',
       }
-      if (config.generationLease === undefined || config.generationCatalogDir === undefined) return instantiate()
-      return config.generationLease.read(config.generationCatalogDir, instantiate)
     },
   }))
+  return runtime
 }

@@ -7,15 +7,20 @@ import {
   WorkerRegistry,
   createRedis,
 } from '@byclaw/by-framework'
+import {
+  buildByClawInboundExtraPayload,
+  parseByClawLiveE2eArgs,
+} from '../lib/live-e2e-options.js'
 
-const prompts = process.argv.slice(2)
-if (prompts.length === 0) throw new Error('provide at least one prompt')
-const userCode = process.env.USER_CODE || 'adminvip'
+const options = parseByClawLiveE2eArgs(process.argv.slice(2))
+const prompts = options.prompts
 const sessionId = process.env.E2E_SESSION_ID || snowflakeSessionId()
 const cwd = process.env.E2E_CWD?.trim()
-const targetAgentType = `BYCLAW_DSH_${userCode}`
+const targetAgentType = options.targetAgentType
+const userCode = process.env.USER_CODE || 'adminvip'
 const timeoutMs = Number(process.env.E2E_TIMEOUT_MS || 10 * 60 * 1000)
 const redis = createRedis()
+const extraPayload = buildByClawInboundExtraPayload(cwd, options)
 
 function snowflakeSessionId() {
   const epoch = 1704067200000n
@@ -30,14 +35,14 @@ try {
   const workerId = await registry.getTargetWorker(targetAgentType)
   if (!workerId) throw new Error(`no online ${targetAgentType} worker`)
   const gateway = new GatewayClient(registry, redis)
-  console.log(JSON.stringify({ sessionId, targetAgentType, workerId, ...(cwd ? { cwd } : {}) }))
+  console.log(JSON.stringify({ sessionId, targetAgentType, workerId, extraPayload }))
   for (const prompt of prompts) {
     const response = await gateway.sendMessage({
       targetAgentType,
       sessionId,
       content: prompt,
       userCode,
-      extraPayload: cwd ? { cwd } : {},
+      extraPayload,
       requireOnlineWorker: true,
     })
     if (!response.success) throw new Error(response.error || response.status)
