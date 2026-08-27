@@ -1,8 +1,10 @@
 /** ByClaw authorization catalog and Skill cache verification. */
 
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 import { loadAuthorizedByClawResources, loadByClawExpertGroupRuntime } from '../lib/catalog.js'
 import { projectByClawResourcesToTemplates } from '../lib/integration.js'
 import { readAgentTemplate } from '../lib/agent-template.js'
@@ -14,82 +16,80 @@ import {
   writeCachedByClawSkill,
 } from '../lib/skill-sync.js'
 
+const execFileAsync = promisify(execFile)
+
 const snapshots = new Map([
   ['DIG_EMPLOYEE_1', JSON.stringify({
-    resourceId: '1', resourceName: '旧架构师', resourceDesc: '旧架构描述', workerAgentType: 'BYCLAW_CODE',
+    resourceId: '1', resourceCode: 'EMP_1', resourceName: '架构师', resourceDesc: '当前架构描述',
+    workerAgentType: 'BYCLAW_CODE', configVersion: 'current-v1',
     relPrompt: JSON.stringify([{ name: '工作规范', value: '先确认约束。' }]),
     coreCompetencies: JSON.stringify([{ coreCompetency: '定义模块边界' }]),
   })],
   ['DIG_EMPLOYEE_9', JSON.stringify({
-    resourceId: '9', resourceName: '旧研发团', resourceDesc: '旧专家团描述含 ACP', workerAgentType: 'BY_SUPER', configVersion: 'old-v9',
-    employeeGroupMembers: [{ resourceId: '1', resourceCode: 'EMP_1', name: '旧架构师', teamRole: '旧负责人' }],
+    resourceId: '9', resourceCode: 'GROUP_9', resourceName: '研发团', resourceDesc: '当前专家团描述',
+    workerAgentType: 'BY_SUPER', configVersion: 'current-v9',
+    employeeGroupMembers: [
+      { resourceId: '1', resourceCode: 'EMP_1', name: '架构师', teamRole: '架构负责人', sortOrder: 1 },
+      { resourceId: '2', resourceCode: 'EMP_2', name: '开发者', teamRole: '开发负责人', sortOrder: 2 },
+    ],
+  })],
+  ['DIG_EMPLOYEE_2', JSON.stringify({
+    resourceId: '2', resourceCode: 'EMP_2', resourceName: '开发者', resourceDesc: '仅专家团成员',
+    workerAgentType: 'BYCLAW_CODE',
   })],
 ])
+const redisReads = []
 const redis = {
   async get(key) {
+    redisReads.push(['get', key])
     if (key === 'SHARE_BFM_USER_CODE_tester') return '42'
     return snapshots.get(key) ?? null
   },
   async hgetall(key) {
-    if (key !== 'user:42:login:auth') return {}
-    return { 'Beyond-Token': 'secret-token', 'Sso-Token': 'secret-sso' }
+    redisReads.push(['hgetall', key])
+    if (key === 'USER:RESOURCES:AUTH:42') {
+      return {
+        1: 'DIG_EMPLOYEE',
+        ignored: JSON.stringify({ resourceBizType: 'WORKFLOW', resourceId: 'ignored' }),
+        group: JSON.stringify({ resourceType: 'DIG_EMPLOYEE', resourceId: 9 }),
+      }
+    }
+    if (key === 'user:42:login:auth') {
+      return { 'Beyond-Token': 'secret-token', 'Sso-Token': 'secret-sso' }
+    }
+    return {}
+  },
+  async exists(key) {
+    redisReads.push(['exists', key])
+    return key === 'USER:RESOURCES:AUTH:42' ? 1 : 0
   },
 }
-const requests = []
 const resources = await loadAuthorizedByClawResources({
   redis,
   userCode: 'tester',
   baseUrl: 'http://byclaw.test',
-  fetchImpl: async (url, init) => {
-    const request = { url: String(url), init }
-    requests.push(request)
-    if (request.url.endsWith('/byaiService/api/v2/digitEmploy/discoverMine')) {
-      return new Response(JSON.stringify({ success: true, data: [
-        { resourceId: '1', name: '架构师', usesPermissions: true },
-        { resourceId: '9', name: '研发团', usesPermissions: true },
-        { resourceId: '2', name: '未授权员工', usesPermissions: false },
-      ] }), { status: 200, headers: { 'content-type': 'application/json' } })
-    }
-    if (request.url.endsWith('/byaiService/digitalEmployeeController/findDetailsById')) {
-      const body = JSON.parse(String(init.body))
-      const data = body.resourceId === '1'
-        ? {
-            resourceId: '1', resourceCode: 'EMP_1', resourceName: '架构师', resourceDesc: '当前架构描述',
-            workerAgentType: 'BYCLAW_CODE', configVersion: 'current-v1',
-            relPrompt: JSON.stringify([{ name: '工作规范', value: '先确认约束。' }]),
-            coreCompetencies: JSON.stringify([{ coreCompetency: '定义模块边界' }]),
-          }
-        : {
-            resourceId: '9', resourceCode: 'GROUP_9', resourceName: '研发团', resourceDesc: '当前专家团描述',
-            workerAgentType: 'BY_SUPER', configVersion: 'current-v9',
-            employeeGroupMembers: [{
-              resourceId: '1', resourceCode: 'EMP_1', name: '架构师', description: '当前架构描述',
-              teamRole: '架构负责人', sortOrder: 1, workerAgentType: 'BYCLAW_CODE',
-            }],
-          }
-      return new Response(JSON.stringify({ success: true, data }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    }
-    throw new Error(`unexpected catalog request ${request.url}`)
-  },
+  fetchImpl: async url => { throw new Error(`catalog made unexpected HTTP request ${String(url)}`) },
 })
-if (resources.employees.length !== 1 || resources.groups.length !== 1
-  || resources.employees[0]?.description !== '当前架构描述'
+if (resources.employees.length !== 2 || resources.groups.length !== 1
+  || resources.employees.find(employee => employee.id === '1')?.description !== '当前架构描述'
   || resources.groups[0]?.description !== '当前专家团描述'
   || resources.groups[0]?.configVersion !== 'current-v9'
-  || resources.groups[0]?.members[0]?.role !== '架构负责人') {
-  throw new Error('authorized catalog did not load current employee and group details')
+  || resources.groups[0]?.members[1]?.role !== '开发负责人'
+  || resources.directEmployeeIds.join(',') !== '1') {
+  throw new Error(`authorized catalog did not target-load direct resources and supplementary group members: ${JSON.stringify(resources)}`)
 }
-const discoverRequest = requests.find(request => request.url.endsWith('/byaiService/api/v2/digitEmploy/discoverMine'))
-const detailRequests = requests.filter(request => request.url.endsWith('/byaiService/digitalEmployeeController/findDetailsById'))
-if (discoverRequest?.init.headers['Beyond-Token'] !== 'secret-token'
-  || discoverRequest.init.redirect !== 'manual'
-  || detailRequests.length !== 2
-  || detailRequests.some(request => request.init.headers['Beyond-Token'] !== 'secret-token'
-    || request.init.redirect !== 'manual')) {
-  throw new Error('discoverMine request did not use Redis authentication')
+const expectedReads = new Set([
+  'get:SHARE_BFM_USER_CODE_tester',
+  'hgetall:USER:RESOURCES:AUTH:42',
+  'exists:USER:RESOURCES:AUTH:42',
+  'hgetall:user:42:login:auth',
+  'get:DIG_EMPLOYEE_1',
+  'get:DIG_EMPLOYEE_9',
+  'get:DIG_EMPLOYEE_2',
+])
+if (redisReads.some(read => !expectedReads.has(read.join(':')))
+  || [...expectedReads].some(expected => !redisReads.some(read => read.join(':') === expected))) {
+  throw new Error(`authorized catalog read unexpected Redis keys: ${JSON.stringify(redisReads)}`)
 }
 
 const groupRuntime = await loadByClawExpertGroupRuntime({
@@ -208,6 +208,23 @@ try {
     if (!String(error).includes('origin')) throw error
   }
   if (credentialFetches !== 1) throw new Error('cross-origin Skill URL received credentials')
+  const backslashSource = join(root, 'backslash-source')
+  const backslashZip = join(root, 'backslash-skill.zip')
+  const backslashEntry = 'windows-skill\\SKILL.md'
+  await mkdir(backslashSource, { recursive: true })
+  await writeFile(join(backslashSource, backslashEntry), '---\nname: windows-skill\ndescription: Windows ZIP paths\n---\nUse normalized paths.\n')
+  await execFileAsync('zip', ['-q', backslashZip, backslashEntry], { cwd: backslashSource })
+  const backslashZipBytes = await readFile(backslashZip)
+  const backslashSkill = await syncByClawSkill({
+    ref: { id: 'windows-skill', code: 'windows-skill', type: 'hub', versionUrl: '/windows-version', downloadUrl: '/windows-skill.zip' },
+    baseUrl: 'http://byclaw.test', headers: { 'Beyond-Token': 'secret-token' }, cacheRoot: join(root, 'cache'),
+    fetchImpl: async url => String(url).endsWith('/windows-version')
+      ? new Response(JSON.stringify({ data: { version: 'v1' } }), { status: 200 })
+      : new Response(backslashZipBytes, { status: 200 }),
+  })
+  if (!(await readFile(join(backslashSkill, 'SKILL.md'), 'utf8')).includes('normalized paths')) {
+    throw new Error('Skill ZIP with backslash entry paths was not normalized and published')
+  }
   for (const code of ['', '.', '..', '../escape', 'a/b', 'a\\b', '%2e%2e', 'a:b', 'CON', 'LPT1.txt', 'trailing.', 'trailing ']) {
     try {
       byClawSkillCacheDir(join(root, 'cache'), code)
@@ -216,12 +233,22 @@ try {
       if (!String(error).includes('Skill code')) throw error
     }
   }
+  let activeProjectionReads = 0
+  let maxActiveProjectionReads = 0
+  const projectionRead = async value => {
+    activeProjectionReads += 1
+    maxActiveProjectionReads = Math.max(maxActiveProjectionReads, activeProjectionReads)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    activeProjectionReads -= 1
+    return value
+  }
   projected = await projectByClawResourcesToTemplates({
     resources,
     agentTemplateDir: join(root, 'agent-templates'),
     teamCatalogDir: join(root, 'team-catalog'),
     cacheRoot: join(root, 'cache'),
     baseUrl: 'http://byclaw.test',
+    projectionConcurrency: 2,
     syncSkill: async (ref, cacheRoot) => {
       const staged = join(cacheRoot, ref.code)
       await writeCachedByClawSkill({
@@ -231,7 +258,8 @@ try {
       })
       return staged
     },
-    resolveGroupRuntime: async groupId => ({
+    resolveModel: async bindingId => projectionRead({ provider: `provider-${bindingId}`, model: 'test-model' }),
+    resolveGroupRuntime: async groupId => projectionRead({
       groupId,
       name: '研发团',
       prompt: '只负责调度团员。',
@@ -244,6 +272,9 @@ try {
       }],
     }),
   })
+  if (maxActiveProjectionReads !== 2) {
+    throw new Error(`projection requests did not honor bounded concurrency: ${maxActiveProjectionReads}`)
+  }
   const employee = await readAgentTemplate(join(root, 'agent-templates'), 'byclaw-employee-1')
   const group = await readAgentTemplate(join(root, 'agent-templates'), 'byclaw-group-9')
   if (employee?.kind !== 'agent' || employee.expertTeam !== undefined

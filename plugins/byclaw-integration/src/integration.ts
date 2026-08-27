@@ -77,6 +77,21 @@ function assertDisjointTargets(targets: readonly string[]): void {
   }
 }
 
+function createConcurrencyLimit(concurrency: number): <T>(operation: () => Promise<T>) => Promise<T> {
+  let active = 0
+  const waiting: Array<() => void> = []
+  return async <T>(operation: () => Promise<T>): Promise<T> => {
+    if (active >= concurrency) await new Promise<void>(resolve => waiting.push(resolve))
+    active += 1
+    try {
+      return await operation()
+    } finally {
+      active -= 1
+      waiting.shift()?.()
+    }
+  }
+}
+
 async function publishDirectories(replacements: readonly DirectoryReplacement[]): Promise<void> {
   const published: PublishedDirectory[] = []
   try {
@@ -205,10 +220,16 @@ export async function projectByClawResourcesToTemplates(options: {
   resolveGroupRuntime?: (groupId: string) => Promise<ByClawExpertGroupRuntime>
   resolveModel?: (bindingId: string, modelId?: string) => Promise<ModelSelection>
   generationLease?: GenerationLease
+  projectionConcurrency?: number
 }): Promise<ProjectedByClawTemplates> {
   const liveAgentTemplates = join(resolve(options.agentTemplateDir), 'templates')
   const liveTeamTemplates = join(resolve(options.teamCatalogDir), 'templates')
   const liveSkillCache = resolve(options.cacheRoot)
+  const projectionConcurrency = options.projectionConcurrency ?? 8
+  if (!Number.isInteger(projectionConcurrency) || projectionConcurrency < 1) {
+    throw new Error('ByClaw projectionConcurrency must be a positive integer')
+  }
+  const limit = createConcurrencyLimit(projectionConcurrency)
   assertDisjointTargets([liveAgentTemplates, liveTeamTemplates, liveSkillCache])
 
   await Promise.all([
@@ -252,23 +273,35 @@ export async function projectByClawResourcesToTemplates(options: {
       headers: options.resources.authHeaders,
       cacheRoot,
     }))
-    for (const skill of skillRefs.values()) {
-      const stagedPath = resolve(await sync(skill, stagedSkillCache))
-      const expectedStagedPath = byClawSkillCacheDir(stagedSkillCache, skill.code)
-      if (stagedPath !== expectedStagedPath) {
-        throw new Error(`ByClaw Skill synchronizer published outside its generation cache: ${stagedPath}`)
-      }
-      skillPaths.set(skill.code, byClawSkillCacheDir(liveSkillCache, skill.code))
-    }
-
     const direct = new Set(options.resources.directEmployeeIds)
     const employeesById = new Map(options.resources.employees.map(employee => [employee.id, employee]))
-    const employeeModels = new Map<string, ModelSelection>()
-    if (options.resolveModel !== undefined) {
-      for (const employee of options.resources.employees) {
-        employeeModels.set(employee.id, await options.resolveModel(`employee:${employee.id}`, employee.modelId))
-      }
-    }
+    const [synchronizedSkills, resolvedModels, resolvedGroupRuntimes] = await Promise.all([
+      Promise.all([...skillRefs.values()].map(skill => limit(async () => {
+        const stagedPath = resolve(await sync(skill, stagedSkillCache))
+        const expectedStagedPath = byClawSkillCacheDir(stagedSkillCache, skill.code)
+        if (stagedPath !== expectedStagedPath) {
+          throw new Error(`ByClaw Skill synchronizer published outside its generation cache: ${stagedPath}`)
+        }
+        return [skill.code, byClawSkillCacheDir(liveSkillCache, skill.code)] as const
+      }))),
+      options.resolveModel === undefined
+        ? Promise.resolve([])
+        : Promise.all(options.resources.employees.map(employee => limit(async () => [
+          employee.id,
+          await options.resolveModel?.(`employee:${employee.id}`, employee.modelId) as ModelSelection,
+        ] as const))),
+      Promise.all(options.resources.groups.map(group => limit(async () => [
+        group.id,
+        await (options.resolveGroupRuntime?.(group.id) ?? loadByClawExpertGroupRuntime({
+          groupId: group.id,
+          baseUrl: options.baseUrl,
+          authHeaders: options.resources.authHeaders,
+        })),
+      ] as const))),
+    ])
+    for (const [code, path] of synchronizedSkills) skillPaths.set(code, path)
+    const employeeModels = new Map<string, ModelSelection>(resolvedModels)
+    const groupRuntimes = new Map<string, ByClawExpertGroupRuntime>(resolvedGroupRuntimes)
     const agents: DshAgentTemplate[] = []
     for (const employee of options.resources.employees) {
       const template: DshAgentTemplate = {
@@ -296,11 +329,7 @@ export async function projectByClawResourcesToTemplates(options: {
     const teamAdapters: ExpertTeamTemplate[] = []
     for (const group of options.resources.groups) {
       const teamTemplateId = `byclaw-team-${group.id}`
-      const runtime = await (options.resolveGroupRuntime?.(group.id) ?? loadByClawExpertGroupRuntime({
-        groupId: group.id,
-        baseUrl: options.baseUrl,
-        authHeaders: options.resources.authHeaders,
-      }))
+      const runtime = groupRuntimes.get(group.id) as ByClawExpertGroupRuntime
       const members: ExpertTemplateMember[] = runtime.members.map((declaration) => {
         const employee = employeesById.get(declaration.employeeId)
         if (employee === undefined) throw new Error(`ByClaw group ${group.id} refers to missing employee ${declaration.employeeId}`)

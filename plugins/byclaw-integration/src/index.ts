@@ -26,6 +26,9 @@ import {
 import { ByClawDshSessionRuntime } from './session-runtime.ts'
 import { registerAgentTemplateRuntime } from './template-runtime.ts'
 import { resolveByClawInboundTarget } from './inbound-routing.ts'
+import {
+  ByClawResourceWatch,
+} from './resource-watch.ts'
 import { registerByClawSessionEventType } from './session-workspace.ts'
 import { ByClawDshWorkerRuntime } from './worker-runtime.ts'
 import {
@@ -66,6 +69,12 @@ export interface Config {
   agentTypes?: string[]
   maxConcurrency?: number
   refreshChannel?: string
+  authorizationPollMs?: number
+  authorizationPollOnlyMs?: number
+  authorizationMissingGraceMs?: number
+  resourceDebounceMs?: number
+  snapshotConcurrency?: number
+  projectionConcurrency?: number
   subagentProvider?: string
   agentPreset?: string
 }
@@ -85,6 +94,12 @@ export const Config: z<Config> = z.object({
   agentTypes: z.array(z.string()).default(undefined as unknown as string[]),
   maxConcurrency: z.natural().min(1).default(8),
   refreshChannel: z.string().default('byai:pub:dig_employee_change'),
+  authorizationPollMs: z.natural().min(1).default(5_000),
+  authorizationPollOnlyMs: z.natural().min(1).default(2_000),
+  authorizationMissingGraceMs: z.natural().min(1).default(15_000),
+  resourceDebounceMs: z.natural().min(1).default(250),
+  snapshotConcurrency: z.natural().min(1).default(8),
+  projectionConcurrency: z.natural().min(1).default(8),
   subagentProvider: z.string().default('spawn'),
   agentPreset: z.string().default('standard'),
 })
@@ -208,28 +223,25 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   let resources: AuthorizedByClawResources
   let sessions: ByClawDshSessionRuntime | undefined
   let worker: ByClawDshWorkerRuntime | undefined
-  let subscriber: ReturnType<typeof redis.duplicate> | undefined
-  let subscribed = false
+  let resourceWatch: ByClawResourceWatch | undefined
   let acceptingRefresh = true
   let refresh: Promise<AuthorizedByClawResources | undefined> = Promise.resolve(undefined)
   let disposed = false
-  let onMessage: (() => void) | undefined
+  const deletedResourceIds = new Set<string>()
   const close = async (): Promise<void> => {
     if (disposed) return
     disposed = true
     acceptingRefresh = false
-    if (subscriber !== undefined && onMessage !== undefined) subscriber.off('message', onMessage)
     const failures: unknown[] = []
     const settle = async (operation: (() => Promise<unknown>) | undefined): Promise<void> => {
       if (operation === undefined) return
       try { await operation() } catch (error: unknown) { failures.push(error) }
     }
+    await settle(resourceWatch === undefined ? undefined : () => resourceWatch?.close() ?? Promise.resolve())
     await settle(() => generationLease.close())
     await settle(() => refresh)
-    if (subscribed) await settle(() => subscriber?.unsubscribe(refreshChannel) ?? Promise.resolve())
     await settle(worker === undefined ? undefined : () => worker?.close() ?? Promise.resolve())
     await settle(sessions === undefined ? undefined : () => sessions?.close() ?? Promise.resolve())
-    await settle(subscriber === undefined ? undefined : () => subscriber?.quit() ?? Promise.resolve())
     await settle(() => redis.quit())
     if (failures.length > 0) throw new AggregateError(failures, 'byclaw-dsh resource disposal failed')
   }
@@ -237,7 +249,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const synchronize = (): Promise<AuthorizedByClawResources> => {
     if (!acceptingRefresh) return Promise.reject(new Error('byclaw-dsh resource refresh rejected during disposal'))
     const operation = refresh.then(async () => {
-      const next = await loadAuthorizedByClawResources({ redis, userCode, baseUrl })
+      const next = await loadAuthorizedByClawResources({
+        redis,
+        userCode,
+        baseUrl,
+        snapshotConcurrency: config.snapshotConcurrency ?? 8,
+        excludedResourceIds: deletedResourceIds,
+      })
       await projectByClawResourcesToTemplates({
         resources: next,
         agentTemplateDir,
@@ -245,9 +263,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         cacheRoot: skillCacheDir,
         baseUrl,
         generationLease,
+        projectionConcurrency: config.projectionConcurrency ?? 8,
         resolveModel: (bindingId, modelId) => models.resolve(bindingId, modelId),
       })
       resources = next
+      resourceWatch?.updateWatchedResources(new Set([
+        ...next.employees.map(employee => employee.id),
+        ...next.groups.map(group => group.id),
+        ...next.groups.flatMap(group => group.members.map(member => member.employeeId)),
+      ]))
       return next
     })
     refresh = operation.catch(() => undefined)
@@ -268,17 +292,43 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       redisModelsEnabled,
     })
 
-    subscriber = redis.duplicate()
-    onMessage = () => {
-      if (!acceptingRefresh) return
-      void synchronize().catch(error => ctx.logger.warn(`byclaw-dsh resource refresh failed: ${String(error)}`))
-    }
-    subscriber.on('message', onMessage)
-    subscribed = true
-    await subscriber.subscribe(refreshChannel)
-
     resources = await synchronize()
     ctx.logger.info(`byclaw-dsh cold-start synchronization complete: employees=${resources.employees.length}; groups=${resources.groups.length}`)
+
+    resourceWatch = new ByClawResourceWatch({
+      redis,
+      userCode,
+      channel: refreshChannel,
+      pollMs: config.authorizationPollMs ?? 5_000,
+      pollOnlyMs: config.authorizationPollOnlyMs ?? 2_000,
+      missingGraceMs: config.authorizationMissingGraceMs ?? 15_000,
+      debounceMs: config.resourceDebounceMs ?? 250,
+      logger: ctx.logger,
+      onAuthorizationChange: async authorization => {
+        const previousAuthorization = new Set(resources.authorization.resourceIds)
+        const nextAuthorization = new Set(authorization.resourceIds)
+        for (const resourceId of deletedResourceIds) {
+          if (!nextAuthorization.has(resourceId)) deletedResourceIds.delete(resourceId)
+        }
+        for (const resourceId of nextAuthorization) {
+          if (!previousAuthorization.has(resourceId)) deletedResourceIds.delete(resourceId)
+        }
+        await synchronize()
+      },
+      onResourceChange: async changes => {
+        for (const change of changes) {
+          if (change.eventType === 'DIG_EMPLOYEE_DELETED') deletedResourceIds.add(change.resourceId)
+          else deletedResourceIds.delete(change.resourceId)
+        }
+        await synchronize()
+      },
+    })
+    resourceWatch.updateWatchedResources(new Set([
+      ...resources.employees.map(employee => employee.id),
+      ...resources.groups.map(group => group.id),
+      ...resources.groups.flatMap(group => group.members.map(member => member.employeeId)),
+    ]))
+    await resourceWatch.start(resources.authorization)
 
     const templateRuntime = registerAgentTemplateRuntime(ctx, {
       catalogDir: agentTemplateDir,

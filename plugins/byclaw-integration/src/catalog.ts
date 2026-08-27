@@ -1,6 +1,10 @@
 /** Authorized ByClaw digital-employee and expert-group catalog loader. */
 
 import { isByClawExpertGroupSnapshot, parseByClawDigitalEmployee, parseByClawExpertGroup } from './resources.ts'
+import {
+  resolveByClawAuthorization,
+  type ByClawAuthorizationRedis,
+} from './resource-authorization.ts'
 import type {
   ByClawDigitalEmployee,
   ByClawExpertGroup,
@@ -8,31 +12,21 @@ import type {
   ByClawExpertGroupRuntime,
 } from './types.ts'
 
-const DISCOVER_PATH = '/byaiService/api/v2/digitEmploy/discoverMine'
-const RESOURCE_DETAIL_PATH = '/byaiService/digitalEmployeeController/findDetailsById'
-const DISCOVER_BODY = {
-  terminals: ['ALL', 'PC', 'APP'],
-  keyword: '',
-  metaStatus: 'ALL',
-  orgFilters: [{ type: 'all' }],
-  orderField: 'updateTime',
-  orderBy: 'desc',
-  language: 'zh-CN',
-}
-
 const ORCHESTRATOR_RUNTIME_PATH = '/byaiService/internal/v1/orchestrators/resolve-runtime'
 
 /** Minimal Redis commands used by resource discovery. */
-export interface ByClawCatalogRedis {
-  get(key: string): Promise<string | null>
-  hgetall(key: string): Promise<Record<string, string>>
-}
+export interface ByClawCatalogRedis extends ByClawAuthorizationRedis {}
 
 export interface AuthorizedByClawResources {
   employees: ByClawDigitalEmployee[]
   groups: ByClawExpertGroup[]
   directEmployeeIds: string[]
   authHeaders: Record<string, string>
+  authorization: {
+    userId: string
+    authKey: string
+    resourceIds: string[]
+  }
 }
 
 export interface LoadAuthorizedByClawResourcesOptions {
@@ -41,6 +35,8 @@ export interface LoadAuthorizedByClawResourcesOptions {
   baseUrl: string
   fetchImpl?: typeof fetch
   timeoutMs?: number
+  snapshotConcurrency?: number
+  excludedResourceIds?: ReadonlySet<string>
 }
 
 /** Inputs for resolving one expert group's own leader runtime. */
@@ -68,18 +64,6 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-function dataArray(payload: unknown): unknown[] {
-  if (Array.isArray(payload)) return payload
-  const root = record(payload)
-  if (root === undefined) return []
-  if (Array.isArray(root['data'])) return root['data']
-  const data = record(root['data'])
-  for (const key of ['records', 'list', 'rows']) {
-    if (Array.isArray(data?.[key])) return data[key] as unknown[]
-  }
-  return []
-}
-
 function responseData(payload: unknown): Record<string, unknown> {
   const root = record(payload)
   const data = record(root?.['data']) ?? root
@@ -105,27 +89,6 @@ function runtimeMembers(value: unknown): ByClawExpertGroupMember[] {
       order: index + 1,
     }
   })
-}
-
-async function loadResourceDetail(
-  options: LoadAuthorizedByClawResourcesOptions,
-  headers: Record<string, string>,
-  resourceId: string,
-): Promise<Record<string, unknown>> {
-  const response = await (options.fetchImpl ?? fetch)(serviceUrl(options.baseUrl, RESOURCE_DETAIL_PATH), {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ resourceId, language: 'zh-CN' }),
-    redirect: 'manual',
-    signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
-  })
-  if (!response.ok) throw new Error(`ByClaw resource detail ${resourceId} failed with HTTP ${response.status}`)
-  const detail = responseData(await response.json())
-  const returnedId = requiredText(detail['resourceId'] ?? detail['id'], 'resourceId')
-  if (returnedId !== resourceId) {
-    throw new Error(`ByClaw resource detail returned ${returnedId}, expected ${resourceId}`)
-  }
-  return detail
 }
 
 function serviceUrl(baseUrl: string, path: string): string {
@@ -175,91 +138,95 @@ export async function loadByClawExpertGroupRuntime(
   }
 }
 
-async function authHeaders(redis: ByClawCatalogRedis, userCode: string): Promise<Record<string, string>> {
-  const mappedUserId = text(await redis.get(`SHARE_BFM_USER_CODE_${userCode}`))
-  if (mappedUserId === '') throw new Error(`ByClaw login auth was not found for userCode ${userCode}`)
-  const auth = await redis.hgetall(`user:${mappedUserId}:login:auth`)
-  const headers: Record<string, string> = { 'content-type': 'application/json', language: 'zh-CN' }
-  for (const key of ['Beyond-Token', 'Sso-Token', 'WHALE_AGENT_AUTHORIZATION']) {
-    const value = text(auth[key])
-    if (value !== '') headers[key] = value
-  }
-  headers['X-User-Id'] = userCode
-  if (headers['Beyond-Token'] === undefined) throw new Error(`ByClaw Beyond-Token was not found for userCode ${userCode}`)
-  return headers
+async function mapConcurrent<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  operation: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (cursor < values.length) {
+      const index = cursor
+      cursor += 1
+      results[index] = await operation(values[index] as T)
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
-/** Discover caller-authorized resource IDs, then load current HTTP detail records. */
+async function loadResourceSnapshot(
+  redis: ByClawCatalogRedis,
+  resourceId: string,
+): Promise<Record<string, unknown>> {
+  const raw = await redis.get(`DIG_EMPLOYEE_${resourceId}`)
+  if (raw === null || raw.trim() === '') throw new Error(`ByClaw Redis resource ${resourceId} was not found`)
+  let snapshot: unknown
+  try {
+    snapshot = JSON.parse(raw) as unknown
+  } catch (error: unknown) {
+    throw new Error(`ByClaw Redis resource ${resourceId} is not valid JSON`, { cause: error })
+  }
+  const parsed = record(snapshot)
+  if (parsed === undefined) throw new Error(`ByClaw Redis resource ${resourceId} must be an object`)
+  const returnedId = requiredText(parsed['resourceId'] ?? parsed['id'], 'resourceId')
+  if (returnedId !== resourceId) {
+    throw new Error(`ByClaw Redis resource returned ${returnedId}, expected ${resourceId}`)
+  }
+  return parsed
+}
+
+/** Load caller-authorized Redis snapshots and supplementary expert-group members by exact ID. */
 export async function loadAuthorizedByClawResources(
   options: LoadAuthorizedByClawResourcesOptions,
 ): Promise<AuthorizedByClawResources> {
   const userCode = options.userCode.trim()
   if (userCode === '') throw new Error('ByClaw userCode must not be empty')
-  const baseUrl = options.baseUrl.replace(/\/+$/u, '')
-  if (baseUrl === '') throw new Error('ByClaw baseUrl must not be empty')
-  const headers = await authHeaders(options.redis, userCode)
-  const response = await (options.fetchImpl ?? fetch)(serviceUrl(baseUrl, DISCOVER_PATH), {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(DISCOVER_BODY),
-    redirect: 'manual',
-    signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
-  })
-  if (!response.ok) throw new Error(`ByClaw discoverMine failed with HTTP ${response.status}`)
-  const discovered = dataArray(await response.json())
-  const authorizedIds = [...new Set(discovered.flatMap((value) => {
-    const item = record(value)
-    if (item === undefined || item['usesPermissions'] !== true) return []
-    const id = text(item['resourceId'] ?? item['id'])
-    return id === '' ? [] : [id]
-  }))]
+  const concurrency = options.snapshotConcurrency ?? 8
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error('ByClaw snapshotConcurrency must be a positive integer')
+  }
+  const authorization = await resolveByClawAuthorization(options.redis, userCode)
+  const effectiveResourceIds = authorization.resourceIds.filter(id => !options.excludedResourceIds?.has(id))
+  const snapshots = await mapConcurrent(
+    effectiveResourceIds,
+    concurrency,
+    id => loadResourceSnapshot(options.redis, id),
+  )
 
   const employees: ByClawDigitalEmployee[] = []
   const groups: ByClawExpertGroup[] = []
-  for (const id of authorizedIds) {
-    const snapshot = await loadResourceDetail(options, headers, id)
+  for (const snapshot of snapshots) {
     if (isByClawExpertGroupSnapshot(snapshot)) groups.push(parseByClawExpertGroup(snapshot))
     else employees.push(parseByClawDigitalEmployee(snapshot))
   }
 
   const directEmployeeIds = employees.map(employee => employee.id)
-  const scan = (options.redis as unknown as {
-    scan?: (cursor: string, ...args: string[]) => Promise<[string, string[]]>
-  }).scan?.bind(options.redis)
-  if (scan !== undefined) {
-    const knownGroups = new Set(groups.map(group => group.id))
-    const authorizedEmployees = new Set(directEmployeeIds)
-    let cursor = '0'
-    do {
-      const page = await scan(cursor, 'MATCH', 'DIG_EMPLOYEE_*', 'COUNT', '200')
-      cursor = page[0]
-      for (const key of page[1]) {
-        const raw = await options.redis.get(key)
-        if (raw === null) continue
-        let snapshot: unknown
-        try { snapshot = JSON.parse(raw) as unknown } catch { continue }
-        if (!isByClawExpertGroupSnapshot(snapshot)) continue
-        const group = parseByClawExpertGroup(snapshot)
-        if (knownGroups.has(group.id) || group.members.length === 0) continue
-        if (group.members.every(member => authorizedEmployees.has(member.employeeId))) {
-          const current = parseByClawExpertGroup(await loadResourceDetail(options, headers, group.id))
-          groups.push(current)
-          knownGroups.add(current.id)
-        }
-      }
-    } while (cursor !== '0')
-  }
-  const loadedEmployeeIds = new Set(directEmployeeIds)
-  for (const memberId of new Set(groups.flatMap(group => group.members.map(member => member.employeeId)))) {
-    if (loadedEmployeeIds.has(memberId)) continue
-    employees.push(parseByClawDigitalEmployee(await loadResourceDetail(options, headers, memberId)))
-    loadedEmployeeIds.add(memberId)
+  const directlyLoadedIds = new Set(effectiveResourceIds)
+  const supplementaryMemberIds = [...new Set(groups.flatMap(group => group.members.map(member => member.employeeId)))]
+    .filter(memberId => !directlyLoadedIds.has(memberId) && !options.excludedResourceIds?.has(memberId))
+  const supplementarySnapshots = await mapConcurrent(
+    supplementaryMemberIds,
+    concurrency,
+    id => loadResourceSnapshot(options.redis, id),
+  )
+  for (const snapshot of supplementarySnapshots) {
+    if (isByClawExpertGroupSnapshot(snapshot)) {
+      throw new Error(`ByClaw expert-group member ${requiredText(snapshot['resourceId'], 'resourceId')} resolved to a group`)
+    }
+    employees.push(parseByClawDigitalEmployee(snapshot))
   }
 
   return {
     employees: employees.sort((left, right) => left.name.localeCompare(right.name)),
     groups: groups.sort((left, right) => left.name.localeCompare(right.name)),
     directEmployeeIds,
-    authHeaders: headers,
+    authHeaders: authorization.authHeaders,
+    authorization: {
+      userId: authorization.userId,
+      authKey: authorization.authKey,
+      resourceIds: authorization.resourceIds,
+    },
   }
 }

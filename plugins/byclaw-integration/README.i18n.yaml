@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write plugins/byclaw-integration/README.md
-README.md: 56345781b4e447cf80d65f23aa5b4c44765a3742
-README.zh.md: 9b1f7e05cef54fe870453e9ac1b25442b0486600
+README.md: c2a4f76427391576bd3a50137cbc602e919bae78
+README.zh.md: 2b53318844b63e9d8484fbf82f7b062a169e7a45

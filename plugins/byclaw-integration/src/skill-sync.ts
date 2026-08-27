@@ -2,7 +2,7 @@
 
 import { execFile } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
-import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Readable } from 'node:stream'
@@ -124,11 +124,57 @@ async function responseVersion(response: Response): Promise<{ version: string; d
   return { version, ...downloadUrl === '' ? {} : { downloadUrl } }
 }
 
-async function validateZip(path: string): Promise<void> {
+async function validateZip(path: string): Promise<string[]> {
   const { stdout } = await execFileAsync('unzip', ['-Z', '-1', path], { maxBuffer: 20 * 1024 * 1024 })
-  for (const entry of stdout.split(/\r?\n/u).map(line => line.trim()).filter(Boolean)) {
+  const entries = stdout.split(/\r?\n/u).map(line => line.trim()).filter(Boolean)
+  for (const entry of entries) {
     validateByClawSkillZipEntryName(entry)
   }
+  return entries
+}
+
+function isBackslashSeparatorWarning(error: unknown): boolean {
+  const failure = error as NodeJS.ErrnoException & { code?: number; stderr?: string }
+  if (failure.code !== 1 || typeof failure.stderr !== 'string') return false
+  const lines = failure.stderr.split(/\r?\n/u).map(line => line.trim()).filter(Boolean)
+  return lines.length > 0 && lines.every(line => /^warning: .* appears to use backslashes as path separators$/u.test(line))
+}
+
+async function pathKind(path: string): Promise<'file' | 'directory' | undefined> {
+  try {
+    return (await lstat(path)).isDirectory() ? 'directory' : 'file'
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+async function normalizeExtractedBackslashEntries(extractDir: string, entries: readonly string[]): Promise<void> {
+  for (const entry of [...entries].filter(value => value.includes('\\')).sort((left, right) => right.length - left.length)) {
+    const literalPath = join(extractDir, entry)
+    const normalizedPath = join(extractDir, ...entry.replace(/\\/gu, '/').split('/'))
+    const literalKind = await pathKind(literalPath)
+    if (literalKind === undefined || literalPath === normalizedPath) continue
+    const normalizedKind = await pathKind(normalizedPath)
+    if (normalizedKind !== undefined) {
+      if (literalKind === 'directory' && normalizedKind === 'directory') {
+        await rm(literalPath, { recursive: true, force: true })
+        continue
+      }
+      throw new Error(`ByClaw Skill ZIP contains colliding entry paths: ${entry}`)
+    }
+    await mkdir(dirname(normalizedPath), { recursive: true })
+    await rename(literalPath, normalizedPath)
+  }
+}
+
+async function extractZip(zipPath: string, extractDir: string, entries: readonly string[]): Promise<void> {
+  try {
+    await execFileAsync('unzip', ['-q', zipPath, '-d', extractDir], { maxBuffer: 20 * 1024 * 1024 })
+  } catch (error: unknown) {
+    if (!isBackslashSeparatorWarning(error)) throw error
+  }
+  await normalizeExtractedBackslashEntries(extractDir, entries)
 }
 
 /** Synchronize one Hub Skill by remote version and return its local root. */
@@ -165,8 +211,8 @@ export async function syncByClawSkill(options: {
     })
     if (!response.ok || response.body === null) throw new Error(`ByClaw Skill download failed with HTTP ${response.status}`)
     await pipeline(Readable.fromWeb(response.body as never), createWriteStream(zipPath))
-    await validateZip(zipPath)
-    await execFileAsync('unzip', ['-q', zipPath, '-d', extractDir], { maxBuffer: 20 * 1024 * 1024 })
+    const entries = await validateZip(zipPath)
+    await extractZip(zipPath, extractDir, entries)
     let sourceDir = extractDir
     try {
       await readFile(join(sourceDir, 'SKILL.md'), 'utf8')

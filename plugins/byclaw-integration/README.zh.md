@@ -40,12 +40,17 @@ ByClaw 入站
 
 ## 动态资源与 Skill
 
-插件先订阅 Redis 变更频道，再执行一次阻塞式冷启动同步；只有订阅和冷启动代次都成功后，Worker 才会上线。运行期间在以下时机刷新：
+插件先执行一次按当前用户授权范围加载的阻塞式冷启动同步，再启动授权与资源监听，最后才让 Worker 上线。运行期间在以下时机刷新：
 
 - 调用 `byclaw_list_resources` 或实例化模板前；
-- 收到 Redis 频道 `byai:pub:dig_employee_change` 的变更通知时。
+- 当前用户的授权 Hash 发生变化时；
+- 收到 Redis 频道 `byai:pub:dig_employee_change` 支持的资源变更时。
 
-Redis 负责登录授权、候选资源 ID 发现、模型配置和变更通知，不作为数字员工或专家团内容的最终来源。每次冷启动或热更新都通过 `digitalEmployeeController/findDetailsById` 读取员工和专家团的当前字段；专家团提示词、模型、有效成员和配置版本来自 `orchestrators/resolve-runtime`。冷启动期间收到的 Redis 信号进入同一串行同步队列，在当前代次完成后继续执行。
+当前 `USER_CODE` 先通过 `SHARE_BFM_USER_CODE_<USER_CODE>` 映射到内部用户 ID，`USER:RESOURCES:AUTH:<userId>` 是资源发现的唯一授权来源。插件只解析其中的 `DIG_EMPLOYEE` 授权，并发读取对应的 `DIG_EMPLOYEE_<resourceId>` snapshot；授权专家团声明了额外成员时，只按成员 ID 补读这些 snapshot。目录发现不调用 `discoverMine` 或 `findDetailsById`，也不扫描全局 `DIG_EMPLOYEE_*` key。Redis snapshot 提供员工与专家团的基础内容；专家团提示词、模型、有效成员和配置版本仍来自 `orchestrators/resolve-runtime`，Skill 版本和压缩包仍通过 ByClaw BE 获取。
+
+Redis 的 `notify-keyspace-events` 支持时，授权监听会订阅当前 Hash 的 keyspace pattern，并始终保留轮询兜底。授权 key 暂时缺失时保留最后一次成功代次；Hash 存在但为空则确认全部授权已撤销。资源频道接受 `DIG_EMPLOYEE_CREATED`、`DIG_EMPLOYEE_UPDATED`、`DIG_EMPLOYEE_DELETED` 和 `DIG_EMPLOYEE_SKILLS_SYNCED`，只让直接授权 ID 或授权专家团成员 ID 的更新进入队列，按 ID 合并一个 debounce 窗口内的事件，使 DELETE 优先，并丢弃旧 `changedAt` 事件。授权与资源信号共用同一串行同步队列。
+
+info 日志会记录监听频道、keyspace／poll 模式、授权信号、资源 ID／type／`changedAt`、被忽略的旧事件或未授权事件、入队批次数量和刷新完成；不会记录授权请求头、Redis 凭据、资源正文、Prompt 或 Skill 内容。
 
 每次刷新都会在快照实时目录前取得独占代际协调器，暂存完整一代 Skill、数字员工模板、专家团模板和 AgentTeams 适配器，并持续持有协调器直至发布、回滚和备份清理完成。模板实例化、基于模板的 AgentTeams 创建和模板列表读取使用共享准入，AgentTeams 模板保存使用独占准入。因此，并发调用方只能使用完整的上一代或完整的新一代数据，发布后获准的保存操作会保留无关模板。卸载期间，协调器拒绝新准入，排空已准入操作和刷新任务，关闭 Worker、会话与 Redis 资源，最后移除服务。刷新成功后删除已撤销授权的 ByClaw 自有产物，同时保留无关文件；刷新失败时保留最后一代完整数据。首次启动失败则直接失败，避免 Worker 带着空资源上线。
 
@@ -106,7 +111,7 @@ Redis 连接只读取标准 `REDIS_*` 环境变量。默认 ByClaw BE 地址为 
     memberMaxDepth: 2
 ```
 
-常用可选项包括 `catalogDir`、`agentTemplateDir`、`skillCacheDir`、`workspace`、`workerId`、`maxConcurrency`、`refreshChannel`、`subagentProvider`、`agentPreset`，以及在 Redis 模式中用作降级、在本地模式中作为必填运行模型的 `provider`/`model`。每个 ByClaw 根会话都会显式挂载 `agentPreset`，默认值为 `standard`；根 Agent 与委派 Agent 只获得该 preset 实际组合的编码工具和作用域 Skill。Trellis、CodeGraph 等运行能力由各自已安装插件注册，ByClaw Integration 不再声明或扫描这些能力。
+常用可选项包括 `catalogDir`、`agentTemplateDir`、`skillCacheDir`、`workspace`、`workerId`、`maxConcurrency`、`refreshChannel`、`subagentProvider`、`agentPreset`，以及在 Redis 模式中用作降级、在本地模式中作为必填运行模型的 `provider`/`model`。资源同步调优项包括 `snapshotConcurrency`（默认 `8`）、`projectionConcurrency`（`8`）、`authorizationPollMs`（`5000`）、`authorizationPollOnlyMs`（`2000`）、`authorizationMissingGraceMs`（`15000`）和 `resourceDebounceMs`（`250`）；`projectionConcurrency` 限制单次代次中 Skill、员工模型和专家团运行配置请求的合计并发数。每个 ByClaw 根会话都会显式挂载 `agentPreset`，默认值为 `standard`；根 Agent 与委派 Agent 只获得该 preset 实际组合的编码工具和作用域 Skill。Trellis、CodeGraph 等运行能力由各自已安装插件注册，ByClaw Integration 不再声明或扫描这些能力。
 
 `agentTypes` 可覆盖 Worker 实际消费的完整 AgentType 列表。缺省时仍注册 `BYCLAW_DSH` 与 `BYCLAW_DSH_<userCode>`。临时替换默认超级助手 Worker 时，以 ByClaw BE 实际报出的目标类型为准；当前默认超级助手入口使用 `['BY_SUPER']`。单一且完全相同的 AgentType 列表会沿用 by-framework 为原 Worker 派生的消费组，避免创建新消费组重放历史消息。接管前必须确认原 Worker 已停止或通过 `WorkerManager.suspendWorker` 暂停，回切时先停止 DSH 再恢复原 Worker。
 
