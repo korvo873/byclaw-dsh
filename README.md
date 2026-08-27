@@ -2,17 +2,20 @@
 
 English | [中文](README.zh.md)
 
-This repository maintains three ByClaw Cordis plugins for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness). They integrate through DSH Service Definitions, events, and tool extension points without modifying DSH core source.
+This repository maintains the ByClaw plugin suite for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness). The plugins integrate through DSH services, events, tools, prompts, and bundle layers without modifying DSH core source.
 
 ## Plugin index
 
 | Plugin | Package | Responsibility | Documentation |
 | --- | --- | --- | --- |
 | AgentTeams | `@byclaw/dsh-agent-teams` | Creates durable multi-agent teams with task DAGs, scheduling, messaging, archives, and a Web activity panel | [中文](./plugins/agent-teams/README.zh.md) · [English](./plugins/agent-teams/README.md) |
-| ByClaw Integration | `@byclaw/dsh-integration` | Synchronizes ByClaw digital employees, expert groups, Skills, and models; registers the `BYCLAW_DSH` Worker; and maps DSH session events | [中文](./plugins/byclaw-integration/README.zh.md) · [English](./plugins/byclaw-integration/README.md) |
-| Trellis Context | `@byclaw/dsh-trellis-context` | Initializes Trellis repositories and injects repository specifications, SessionStart data, and workflow context into the same model step | [中文](./plugins/trellis-context/README.zh.md) · [English](./plugins/trellis-context/README.md) |
+| ByClaw Integration | `@byclaw/dsh-integration` | Synchronizes ByClaw digital employees, expert groups, Skills, and models; registers the `BYCLAW_DSH` Worker; maps DSH session events; and injects session context without rewriting user messages | [中文](./plugins/byclaw-integration/README.zh.md) · [English](./plugins/byclaw-integration/README.md) |
+| Trellis | `@byclaw/dsh-trellis` | Injects Trellis workflow state, provisions workflow Skills, and exposes task-management tools and UI | [中文](./plugins/dsh-trellis/README.md) · [English](./plugins/dsh-trellis/README_EN.md) |
+| Better Sidebar | `@byclaw/dsh-better-sidebar` | Provides the workspace sidebar, editor, terminal, Git, browser, and sidebar extension service | [中文](./plugins/dsh-better-sidebar/README.md) · [English](./plugins/dsh-better-sidebar/README_EN.md) |
+| Diff Viewer | `@byclaw/dsh-diff-viewer` | Replaces write/edit diff cards with a scalable unified or split visual diff | [README](./plugins/dsh-diff-viewer/README.md) |
+| CodeGraph | `@byclaw/dsh-codegraph` | Composes the CodeGraph MCP server and registers CodeGraph usage policy for root and delegated Agents | [中文](./plugins/dsh-codegraph/README.zh.md) · [English](./plugins/dsh-codegraph/README.md) |
 
-All three packages are private DSH workspace packages and are not published to the npm registry. Their `workspace:` dependencies must resolve inside a DSH source workspace, so place the plugin directories below `<deepseek-harness>/plugins/` before installing and building them.
+The packages are private DSH workspace packages and are not published to the npm registry. Their `workspace:` dependencies resolve inside a DSH source workspace, so place the plugin directories below `<deepseek-harness>/plugins/` before installing and building them. Trellis, Better Sidebar, and Diff Viewer retain their upstream licenses and exact import provenance in `UPSTREAM.md`; ByClaw owns the maintained package identities and profile composition.
 
 ## Architecture and load order
 
@@ -25,21 +28,28 @@ DSH profile
 ├── @byclaw/dsh-integration
 │   ├── Redis / ByClaw BE 资源与模型同步
 │   ├── 数字员工与专家团模板、作用域 Skill
-│   ├── BYCLAW_DSH Worker 和会话映射
+│   ├── BYCLAW_DSH Worker、原样业务消息和会话映射
+│   ├── plugin:byclaw-context 会话与工作区注入
 │   └── 专家团团长通过 AgentTeams 调度团员
-└── @byclaw/dsh-trellis-context（可选）
-    ├── Git / Trellis 仓库识别与幂等初始化
-    └── 同步骤 bootstrap、规范索引和 workflow state 注入
+├── @byclaw/dsh-trellis
+├── @byclaw/dsh-better-sidebar
+├── @byclaw/dsh-diff-viewer
+└── @byclaw/dsh-codegraph
+    ├── codegraph-mcp：MCP 进程与工具注册
+    └── codegraph:usage-policy：根与委派 Agent 继承的系统提示词
 ```
 
-Install the packages in this order: `agent-teams`, `byclaw-integration`, then `trellis-context`. ByClaw expert groups depend on AgentTeams. Trellis Context runs independently and is disabled by default.
+Install AgentTeams before ByClaw Integration because expert groups depend on it. The other four packages compose independently. ByClaw Integration owns only the durable ByAI session namespace and workspace context; Trellis and CodeGraph own their runtime-capability prompts.
+
+ByClaw Integration keeps each ByAI business instruction as an unchanged `source: user` message. It records the external `session_id` and `cwd` as durable session data, then adds a separate `plugin:byclaw-context` message on each Agent's first admitted step so root and delegated Agents receive the same workspace declaration with correct provenance.
+
+ByClaw inbound messages can target an authorized digital employee or expert group directly with `extra_payload.agent_id`, `agent_code`, or `agent_name`; the live smoke helper exposes the same fields as `--agent-id`, `--agent-code`, and `--agent-name`. When structured metadata is absent, one unambiguous `@resource-name` or `@resource-code` mention in the message body is also accepted and removed before delivery. Invalid, unauthorized, conflicting, or ambiguous targets fail before a child session is created; messages without a target continue through the main Agent route.
 
 ## Prerequisites
 
 - A DSH source workspace and an available `dsh` CLI
 - Node.js `^22.19.0 || >=24`, pnpm, and a completed `pnpm install` in the DSH workspace
 - ByClaw Integration: reachable ByClaw BE and Redis services
-- Trellis Context: Git, `bash`, `python3`, and a shell provider that shares the repository filesystem with the DSH process
 
 ## Installation
 
@@ -49,7 +59,10 @@ Install the packages in this order: `agent-teams`, `byclaw-integration`, then `t
 git clone https://github.com/korvo873/byclaw-dsh.git /path/to/byclaw-dsh
 cp -R /path/to/byclaw-dsh/plugins/agent-teams /path/to/deepseek-harness/plugins/
 cp -R /path/to/byclaw-dsh/plugins/byclaw-integration /path/to/deepseek-harness/plugins/
-cp -R /path/to/byclaw-dsh/plugins/trellis-context /path/to/deepseek-harness/plugins/
+cp -R /path/to/byclaw-dsh/plugins/dsh-trellis /path/to/deepseek-harness/plugins/
+cp -R /path/to/byclaw-dsh/plugins/dsh-better-sidebar /path/to/deepseek-harness/plugins/
+cp -R /path/to/byclaw-dsh/plugins/dsh-diff-viewer /path/to/deepseek-harness/plugins/
+cp -R /path/to/byclaw-dsh/plugins/dsh-codegraph /path/to/deepseek-harness/plugins/
 ```
 
 If a destination already exists, preserve its local changes and merge updates with a Git diff. Do not overwrite a plugin directory that contains uncommitted work.
@@ -61,7 +74,9 @@ cd /path/to/deepseek-harness
 pnpm install
 pnpm --filter @byclaw/dsh-agent-teams run build
 pnpm --filter @byclaw/dsh-integration run build
-pnpm --filter @byclaw/dsh-trellis-context run build
+pnpm --filter @byclaw/dsh-better-sidebar run build
+pnpm --filter @byclaw/dsh-diff-viewer run build
+pnpm --filter @byclaw/dsh-codegraph run build
 ```
 
 Rebuild the affected package after changing plugin source.
@@ -73,11 +88,14 @@ The example uses the `web` profile. Replace it with `headless` for a deployment 
 ```sh
 dsh plugin --profile web add /path/to/deepseek-harness/plugins/agent-teams
 dsh plugin --profile web add /path/to/deepseek-harness/plugins/byclaw-integration
-dsh plugin --profile web add /path/to/deepseek-harness/plugins/trellis-context
+dsh plugin --profile web add /path/to/deepseek-harness/plugins/dsh-trellis
+dsh plugin --profile web add /path/to/deepseek-harness/plugins/dsh-better-sidebar
+dsh plugin --profile web add /path/to/deepseek-harness/plugins/dsh-diff-viewer
+dsh plugin --profile web add /path/to/deepseek-harness/plugins/dsh-codegraph
 dsh --profile web --dump-config
 ```
 
-`dsh plugin add` links each package into the profile and uses its `dsh.bundle.patch` declaration to append the plugin layer to `dsh.profile.bundles`. The bundled `trellis-context` row has `enabled: false`, so installation alone does not activate it.
+`dsh plugin add` links or installs each package into the profile and uses its `dsh.bundle.patch` declaration to append the plugin layer to `dsh.profile.bundles`. If pnpm blocks `node-pty` while installing `dsh-trellis`, set `allowBuilds.node-pty: true` in the profile's `pnpm-workspace.yaml` and repeat the command.
 
 ## Environment variables
 
@@ -91,7 +109,7 @@ The DSH launcher reads `.env` from its launch working directory. An already expo
 
 | Variable | Requirement | Purpose |
 | --- | --- | --- |
-| `USER_CODE` | Required when Integration or Trellis is enabled | ByClaw login authorization and Trellis identity; explicit plugin `userCode` may supply it instead |
+| `USER_CODE` | Required when Integration is enabled | ByClaw login authorization; explicit plugin `userCode` may supply it instead |
 | `REDIS_HOST`, `REDIS_PORT` | Integration with standalone Redis | Redis endpoint; defaults to `localhost:6379` |
 | `REDIS_USERNAME`, `REDIS_PASSWORD` | Deployment-dependent | Redis credentials |
 | `REDIS_DATABASE` | Optional | Standalone Redis database; defaults to `0` |
@@ -105,7 +123,7 @@ The DSH launcher reads `.env` from its launch working directory. An already expo
 
 Each package's `cordis.patch.yml` inserts its plugin row. A machine-level or profile-level `cordis.patch.yml` can replace the complete `config` for the same `id`; every retained setting must be restated in that replacement.
 
-This example enables all three plugins:
+This example configures the session/team plugins. The capability and Web plugins use their bundle defaults:
 
 ```yaml
 - id: agent-teams
@@ -127,11 +145,16 @@ This example enables all three plugins:
     subagentProvider: spawn
     agentPreset: standard
 
-- id: trellis-context
+- id: codegraph-mcp
   config:
-    enabled: true
-    userCode: !!js process.env.USER_CODE
-    timeoutMs: 120000
+    serverName: codegraph
+    transport: stdio
+    command: codegraph
+    args: [serve, --mcp]
+    cwd: !!js process.cwd()
+    env: {}
+    toolCallTimeoutMs: 60000
+    failOnStartupError: true
 ```
 
 The expert-group path delegates twice—main agent to leader to member—so `agent-teams.memberMaxDepth` must be at least `2`. When `BYCLAW_REDIS_MODEL_ENABLED=false`, `byclaw-dsh.config` must also provide a local `provider` and `model`.
@@ -140,7 +163,6 @@ Each plugin README owns the detailed field semantics, failure conditions, and li
 
 - [AgentTeams configuration and architecture](./plugins/agent-teams/README.zh.md#配置)
 - [ByClaw Integration configuration and architecture](./plugins/byclaw-integration/README.zh.md#配置)
-- [Trellis Context configuration and architecture](./plugins/trellis-context/README.zh.md#配置)
 
 ## Verification and startup
 
@@ -148,21 +170,22 @@ Each plugin README owns the detailed field semantics, failure conditions, and li
 cd /path/to/deepseek-harness
 pnpm --filter @byclaw/dsh-agent-teams run verify
 pnpm --filter @byclaw/dsh-integration run verify
-pnpm --filter @byclaw/dsh-trellis-context run typecheck
-pnpm exec vitest run plugins/trellis-context/tests
+pnpm --filter @byclaw/dsh-trellis run test
+pnpm --filter @byclaw/dsh-better-sidebar run build
+pnpm --filter @byclaw/dsh-diff-viewer run check
+pnpm --filter @byclaw/dsh-codegraph run verify
 dsh --profile web --dump-config
 dsh web
 ```
 
-`--dump-config` must show the `agent-teams`, `byclaw-dsh`, and `trellis-context` rows with their final replaced configuration. Integration subscribes to Redis and completes one blocking resource synchronization before its Worker starts. Trellis runs only when `enabled: true` and the current prompt is admitted.
+`--dump-config` must show `agent-teams`, `byclaw-dsh`, `better-sidebar`, `trellis-workflow`, `dsh-diff-viewer`, `codegraph-mcp`, and `dsh-codegraph`. Integration subscribes to Redis and completes one blocking resource synchronization before its Worker starts.
 
 ## Local state and security
 
 - AgentTeams stores team state in `.agent-teams/` below the session workspace by default.
 - Integration stores templates and Skill caches below DSH-home-derived directories by default, and reads authorized resources through Redis and ByClaw BE.
-- Trellis stores transaction state in `$DSH_HOME/state/trellis-context` by default, requires a directory chain that is not group/world-writable, and rejects symbolic links.
 - `.env`, Redis passwords, model decryption keys, generated `lib/`, `node_modules/`, and runtime state do not belong in source control.
 
 ## Development
 
-The three plugins participate in type checking and builds from the DSH root workspace. Run the smallest verification commands listed in the affected plugin README after each change. Documentation and package behavior must stay aligned with the `Config` Schema, injected-service list, and `cordis.patch.yml` in each package.
+All maintained plugins participate in verification from the DSH root workspace. Run the smallest command covering the affected package after each change. Documentation and package behavior must stay aligned with package metadata, injected-service lists, and bundle patches.

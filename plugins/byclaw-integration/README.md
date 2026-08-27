@@ -18,7 +18,7 @@ dsh plugin --profile web add /path/to/deepseek-harness/plugins/byclaw-integratio
 dsh --profile web --dump-config
 ```
 
-Copy the repository [`.env.example`](../../.env.example) to the DSH launch directory, fill the deployment values, and keep the resulting `.env` untracked. The bundled patch enables this plugin; startup fails when `USER_CODE`, Redis, ByClaw BE, or the selected model route is invalid.
+Copy the repository [`.env.example`](../.env.example) to the DSH launch directory, fill the deployment values, and keep the resulting `.env` untracked. The bundled patch enables this plugin; startup fails when `USER_CODE`, Redis, ByClaw BE, or the selected model route is invalid.
 
 ## Runtime structure
 
@@ -32,12 +32,11 @@ The main agent only discovers resources and selects templates; it does not repla
 ```text
 ByClaw 入站
   -> BYCLAW_DSH Worker
-  -> DSH 主 Agent
-       -> 单数字员工模板 -> 普通子 Agent
-       -> 专家团模板 -> 团长 Agent -> AgentTeams 团员 Agent
+  -> default: DSH main Agent -> template
+  -> explicit agent_id/code/name or @resource: matching template instance -> (expert group) leader -> AgentTeams members
 ```
 
-After the main agent delegates, DSH subagent-settlement events pause and wake it. An expert-group leader pauses and wakes through AgentTeams member events. Neither path polls.
+When an inbound message includes structured `agent_id`, `agent_code`, or `agent_name`, the plugin resolves the authorized catalog and starts or resumes the matching template instance directly; it does not send the business instruction through the main Agent for another routing turn. Without structured metadata, one unambiguous `@resource-name` or `@resource-code` mention can select the target and is removed from the delivered task. The main Agent is only the DSH parent/lifecycle owner for that direct child and does not execute the instruction. Messages without a target stay on the existing main-Agent route. Unknown, unauthorized, conflicting, or ambiguous targets fail before child creation. After the main agent delegates, DSH subagent-settlement events pause and wake it. An expert-group leader pauses and wakes through AgentTeams member events. Neither path polls.
 
 ## Dynamic resources and Skills
 
@@ -73,8 +72,10 @@ With Redis model resolution enabled, resolution falls back from current configur
 
 ## ByClaw message mapping
 
-- ByAI ingress may set `extra_payload.cwd` to an absolute working directory for a new DSH root session; otherwise the plugin `workspace` is used. The plugin records the external `session_id` and resolved directory once as `byclaw/session-workspace`, frames inbound model input with the same session-workspace declaration, and rejects a conflicting directory on resume. Every continuable child copies that durable namespace from its live parent during unpublished creation, retains its own DSH session ID, and receives a cwd-only `delegation-workspace` task declaration.
-- Every inbound `AskAgent` writes terminal-visible lifecycle logs in order: received command identifiers; inherited ByClaw session namespace, DSH ID, effective `cwd`, and root/delegated scope; currently visible CodeGraph capability count; new, resumed, or continued session; non-secret model resolution (`sourceModelId`, provider, model, protocol, and resolution source); and task start with the complete instruction. When a digital-employee or expert-group child is composed, another log lists only that template's Skill names and local paths. The plugin does not add login authorization, Redis passwords, endpoints, or model credentials; because an instruction can contain sensitive text, operators must treat these logs as conversation data.
+- Inbound routing accepts `extra_payload.agent_id`, `agent_code`, or `agent_name` (plus camelCase compatibility spellings), matched against the current user's authorized digital employees or expert groups. A digital employee must be directly authorized; a group must be authorized for the current user. If structured metadata is absent, one case-insensitive `@resource-name` or `@resource-code` mention selects the target; numeric-only mentions are ignored and the selected mention is removed from the task text. Unknown, unauthorized, conflicting, or multiple matching targets are rejected before child creation. Without a target the message stays on the main-Agent route.
+- The ByClaw-facing DSH root session ID is exactly the inbound `session_id`, so resume and cross-system tracing use one identifier. The direct target child ID is deterministic from `userCode + external session_id + template_id`; repeating the same target continues that child context while preserving its internal lineage. The `[byclaw-dsh] 🎯 入站直达` / `scope=direct` log confirms that no main-Agent LLM turn handled the task.
+- ByAI ingress may set `extra_payload.cwd` to an absolute working directory for a new DSH root session; otherwise the plugin `workspace` is used. The plugin records the external `session_id` and resolved directory once as `byclaw/session-workspace` and rejects a conflicting directory on resume. The business instruction remains an unchanged `source: user` message. On each Agent's first admitted step, a separate `plugin:byclaw-context` message declares only the inherited session workspace; durable message inspection prevents reinjection after resume, while a child ignores the parent's seeded marker and records its own context. Every continuable child copies the durable namespace from its live parent during unpublished creation and retains its own DSH session ID; no duplicate workspace wrapper is added to the user message.
+- Every inbound `AskAgent` writes terminal-visible lifecycle logs in order: received command identifiers; inherited ByClaw session namespace, DSH ID, effective `cwd`, and root/delegated scope; new, resumed, or continued session; non-secret model resolution (`sourceModelId`, provider, model, protocol, and resolution source); and task start with the complete instruction. When a digital-employee or expert-group child is composed, another log lists only that template's Skill names and local paths. The plugin does not add login authorization, Redis passwords, endpoints, or model credentials; because an instruction can contain sensitive text, operators must treat these logs as conversation data.
 - DSH text blocks -> `answerDelta`
 - DSH reasoning blocks -> `reasoningLogDelta`
 - `ask_user_question` -> structured ByClaw question card with `contentType=3014`; `ResumeCommand` fills the answer and wakes the originating call
@@ -105,7 +106,7 @@ An expert-group path delegates twice—main agent to leader to member—so the A
     memberMaxDepth: 2
 ```
 
-Common optional settings are `catalogDir`, `agentTemplateDir`, `skillCacheDir`, `workspace`, `workerId`, `maxConcurrency`, `refreshChannel`, `subagentProvider`, `agentPreset`, and the local `provider`/`model` used as the Redis-mode fallback or as the required model in local mode. Every ByClaw root session explicitly mounts `agentPreset`; its default is `standard`. Root and delegated agents receive the coding tools and scoped Skills actually composed by that preset. A CodeGraph system policy appears only when CodeGraph MCP tools are visible to the exact Agent scope, lists only visible operations, and requires every call to pass the inherited cwd as `projectPath`; Trellis policy remains independently owned by the enabled `trellis-context` plugin and the current workspace state.
+Common optional settings are `catalogDir`, `agentTemplateDir`, `skillCacheDir`, `workspace`, `workerId`, `maxConcurrency`, `refreshChannel`, `subagentProvider`, `agentPreset`, and the local `provider`/`model` used as the Redis-mode fallback or as the required model in local mode. Every ByClaw root session explicitly mounts `agentPreset`; its default is `standard`. Root and delegated agents receive the coding tools and scoped Skills actually composed by that preset. Trellis, CodeGraph, and other runtime capabilities are registered by their own installed plugins rather than advertised by ByClaw Integration.
 
 `agentTypes` overrides the complete AgentType list consumed by the Worker. By default, the plugin still registers `BYCLAW_DSH` and `BYCLAW_DSH_<userCode>`. When temporarily replacing the default super-assistant Worker, use the target type actually reported by the ByClaw backend; the current default super-assistant entry uses `['BY_SUPER']`. One identical AgentType list reuses the consumer group that by-framework derived for the original Worker, avoiding historical-message replay in a new consumer group. Before takeover, confirm that the original Worker has stopped or suspend it with `WorkerManager.suspendWorker`; on rollback, stop DSH before restoring the original Worker.
 
@@ -118,8 +119,22 @@ pnpm verify
 This command covers resource parsing, dynamic model configuration, Skill caching, template projection, asynchronous pause/wake, `ask_user`, task plans, and the `BYCLAW_DSH` command bridge. After the Worker is online in a real environment, run:
 
 ```sh
-node scripts/live-e2e.mjs '我有哪些数字员工？请简洁列出他们分别能帮我做什么。'
-E2E_CWD=/absolute/project/path node scripts/live-e2e.mjs '请找架构助手分析项目架构。'
+node scripts/live-e2e.mjs --agent-id 123 '做自我介绍'
+node scripts/live-e2e.mjs --agent-code ARCHITECT '分析架构'
+node scripts/live-e2e.mjs --agent-name '架构舵手' '分析架构'
+E2E_CWD=/absolute/project/path node scripts/live-e2e.mjs --agent-id 123 '做自我介绍'
+node scripts/live-e2e.mjs '@架构舵手 分析架构'
+node scripts/live-e2e.mjs --main '我有哪些数字员工？请简洁列出他们分别能帮我做什么。'
+```
+
+If `.env` is outside the DSH launch directory, start the web profile with:
+
+```sh
+cd /Users/chenxiaofeng/code/open/deepseek-harness
+set -a
+source /Users/chenxiaofeng/code/open/deepseek-harness/.env
+set +a
+pnpm dsh web
 ```
 
 The smoke generates a random numeric Snowflake `session_id` when `E2E_SESSION_ID` is omitted. Set `E2E_SESSION_ID` to an existing numeric Snowflake to continue that ByAI conversation.

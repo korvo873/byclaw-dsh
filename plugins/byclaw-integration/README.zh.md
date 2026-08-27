@@ -18,7 +18,7 @@ dsh plugin --profile web add /path/to/deepseek-harness/plugins/byclaw-integratio
 dsh --profile web --dump-config
 ```
 
-把仓库根目录的 [`.env.example`](../../.env.example) 复制到 DSH 启动目录，填写部署值，并确保生成的 `.env` 不被 Git 跟踪。包内 patch 会启用该插件；`USER_CODE`、Redis、ByClaw BE 或所选模型路由无效时，插件启动失败。
+把仓库根目录的 [`.env.example`](../.env.example) 复制到 DSH 启动目录，填写部署值，并确保生成的 `.env` 不被 Git 跟踪。包内 patch 会启用该插件；`USER_CODE`、Redis、ByClaw BE 或所选模型路由无效时，插件启动失败。
 
 ## 运行结构
 
@@ -32,12 +32,11 @@ dsh --profile web --dump-config
 ```text
 ByClaw 入站
   -> BYCLAW_DSH Worker
-  -> DSH 主 Agent
-       -> 单数字员工模板 -> 普通子 Agent
-       -> 专家团模板 -> 团长 Agent -> AgentTeams 团员 Agent
+  -> 默认：DSH 主 Agent -> 模板
+  -> 指定 agent_id/code/name 或 @资源：对应模板实例 ->（专家团）团长 Agent -> AgentTeams 团员 Agent
 ```
 
-主 Agent 派发后通过 DSH 的子 Agent 结算事件暂停和唤醒；专家团团长通过 AgentTeams 成员事件暂停和唤醒。两条链路都不轮询。
+入站消息指定结构化 `agent_id`、`agent_code` 或 `agent_name` 时，插件先解析授权目录并直接创建／继续对应模板实例，不把这条业务指令交给主 Agent 再做一次路由。没有结构化字段时，正文中的唯一且无歧义的 `@资源名称` 或 `@资源编码` 也可选择目标，并会在投递前移除匹配文本。主 Agent 只作为 DSH 父会话和生命周期归属，不执行该条直达指令。目标不存在、未授权、字段冲突或正文歧义时，会在创建子会话前失败；未指定目标时仍使用主 Agent 的原有路由。主 Agent 派发后通过 DSH 的子 Agent 结算事件暂停和唤醒；专家团团长通过 AgentTeams 成员事件暂停和唤醒。两条链路都不轮询。
 
 ## 动态资源与 Skill
 
@@ -73,8 +72,10 @@ Redis 负责登录授权、候选资源 ID 发现、模型配置和变更通知�
 
 ## ByClaw 消息映射
 
-- ByAI 入站可通过 `extra_payload.cwd` 指定新建 DSH 根会话的绝对工作目录；未提供时使用插件 `workspace`。插件把外部 `session_id` 与解析后的目录一次性记录为 `byclaw/session-workspace`，用同一会话空间声明包装模型入站内容，并在恢复时拒绝冲突目录。每个可继续子 Agent 都会在尚未发布的创建窗口从在线父会话复制该持久命名空间，保留自己独立的 DSH 会话 ID，并在任务中接收只含 cwd 的 `delegation-workspace` 声明。
-- 每条 `AskAgent` 入站会按顺序输出终端可见的生命周期日志：收到命令及其标识；继承的 ByClaw 会话命名空间、DSH ID、实际 `cwd` 和根／委派作用域；当前可见的 CodeGraph 能力数量；新建、恢复或继续会话；不含密钥的模型解析信息（`sourceModelId`、provider、model、protocol 和解析来源）；携带完整指令的任务启动。数字员工或专家团子 Agent 完成组合时，另输出一条日志，只列出该模板自己的 Skill 名称和本地路径。插件不会额外写入登录授权、Redis 密码、模型端点或模型密钥；由于完整指令可能包含敏感内容，运维方必须把这些日志作为对话数据管理。
+- 入站支持 `extra_payload.agent_id`、`agent_code`、`agent_name`（兼容 camelCase 写法），按当前用户授权目录匹配数字员工或专家团；数字员工只允许当前用户直接授权的员工，专家团匹配当前用户授权的专家团。没有结构化字段时，正文中的唯一 `@资源名称`／`@资源编码`（忽略大小写）可选择目标，纯数字 `@` 不作为名称别名，匹配文本会从任务中移除。目标不存在、未授权、字段冲突或多个正文目标会在创建子会话前拒绝。未指定目标仍走主 Agent。
+- ByClaw 对外的 DSH 根会话 ID 与入站 `session_id` 完全一致，续聊和跨系统追踪使用同一个标识。直达实例内部子会话 ID 仍由 `userCode + 外部 session_id + template_id` 稳定生成，同一个会话再次指定同一 ID 会继续原对象上下文并保留内部父子关系。日志中的 `🎯 入站直达` 和 `scope=direct` 可用于确认没有经过主 Agent 的 LLM 回合。
+- ByAI 入站可通过 `extra_payload.cwd` 指定新建 DSH 根会话的绝对工作目录；未提供时使用插件 `workspace`。插件把外部 `session_id` 与解析后的目录一次性记录为 `byclaw/session-workspace`，并在恢复时拒绝冲突目录。业务指令保持为未经改写的 `source: user` 消息。每个 Agent 的第一次获准步骤会另行收到 `plugin:byclaw-context` 消息，其中只声明继承的会话工作区；插件通过持久消息检查避免恢复后重复注入，子 Agent 则忽略父会话种子中的标记并记录自己的上下文。每个可继续子 Agent 都会在尚未发布的创建窗口从在线父会话复制该持久命名空间并保留自己独立的 DSH 会话 ID；用户消息不再重复包装 workspace。
+- 每条 `AskAgent` 入站会按顺序输出终端可见的生命周期日志：收到命令及其标识；继承的 ByClaw 会话命名空间、DSH ID、实际 `cwd` 和根／委派作用域；新建、恢复或继续会话；不含密钥的模型解析信息（`sourceModelId`、provider、model、protocol 和解析来源）；携带完整指令的任务启动。数字员工或专家团子 Agent 完成组合时，另输出一条日志，只列出该模板自己的 Skill 名称和本地路径。插件不会额外写入登录授权、Redis 密码、模型端点或模型密钥；由于完整指令可能包含敏感内容，运维方必须把这些日志作为对话数据管理。
 - DSH 文本块 -> `answerDelta`
 - DSH reasoning 块 -> `reasoningLogDelta`
 - `ask_user_question` -> `contentType=3014` 的结构化 ByClaw 提问卡片；`ResumeCommand` 回填并唤醒原调用
@@ -105,7 +106,7 @@ Redis 连接只读取标准 `REDIS_*` 环境变量。默认 ByClaw BE 地址为 
     memberMaxDepth: 2
 ```
 
-常用可选项包括 `catalogDir`、`agentTemplateDir`、`skillCacheDir`、`workspace`、`workerId`、`maxConcurrency`、`refreshChannel`、`subagentProvider`、`agentPreset`，以及在 Redis 模式中用作降级、在本地模式中作为必填运行模型的 `provider`/`model`。每个 ByClaw 根会话都会显式挂载 `agentPreset`，默认值为 `standard`；根 Agent 与委派 Agent 只获得该 preset 实际组合的编码工具和作用域 Skill。只有 CodeGraph MCP 工具对该 Agent 的精确作用域可见时，系统提示词才会出现 CodeGraph 策略，其中只列出可见操作，并要求每次调用把继承的 cwd 作为 `projectPath`；Trellis 策略仍由已启用的 `trellis-context` 插件及当前工作区状态独立决定。
+常用可选项包括 `catalogDir`、`agentTemplateDir`、`skillCacheDir`、`workspace`、`workerId`、`maxConcurrency`、`refreshChannel`、`subagentProvider`、`agentPreset`，以及在 Redis 模式中用作降级、在本地模式中作为必填运行模型的 `provider`/`model`。每个 ByClaw 根会话都会显式挂载 `agentPreset`，默认值为 `standard`；根 Agent 与委派 Agent 只获得该 preset 实际组合的编码工具和作用域 Skill。Trellis、CodeGraph 等运行能力由各自已安装插件注册，ByClaw Integration 不再声明或扫描这些能力。
 
 `agentTypes` 可覆盖 Worker 实际消费的完整 AgentType 列表。缺省时仍注册 `BYCLAW_DSH` 与 `BYCLAW_DSH_<userCode>`。临时替换默认超级助手 Worker 时，以 ByClaw BE 实际报出的目标类型为准；当前默认超级助手入口使用 `['BY_SUPER']`。单一且完全相同的 AgentType 列表会沿用 by-framework 为原 Worker 派生的消费组，避免创建新消费组重放历史消息。接管前必须确认原 Worker 已停止或通过 `WorkerManager.suspendWorker` 暂停，回切时先停止 DSH 再恢复原 Worker。
 
@@ -118,8 +119,22 @@ pnpm verify
 该命令覆盖资源解析、模型动态装配、Skill 缓存、模板投影、异步暂停/唤醒、`ask_user`、任务计划和 `BYCLAW_DSH` 命令桥。真实环境可在 Worker 上线后执行：
 
 ```sh
-node scripts/live-e2e.mjs '我有哪些数字员工？请简洁列出他们分别能帮我做什么。'
-E2E_CWD=/absolute/project/path node scripts/live-e2e.mjs '请找架构助手分析项目架构。'
+node scripts/live-e2e.mjs --agent-id 123 '做自我介绍'
+node scripts/live-e2e.mjs --agent-code ARCHITECT '分析架构'
+node scripts/live-e2e.mjs --agent-name '架构舵手' '分析架构'
+E2E_CWD=/absolute/project/path node scripts/live-e2e.mjs --agent-id 123 '做自我介绍'
+node scripts/live-e2e.mjs '@架构舵手 分析架构'
+node scripts/live-e2e.mjs --main '我有哪些数字员工？请简洁列出他们分别能帮我做什么。'
+```
+
+启动 DSH Web 时如果 `.env` 不在当前启动目录，可显式指定：
+
+```sh
+cd /Users/chenxiaofeng/code/open/deepseek-harness
+set -a
+source /Users/chenxiaofeng/code/open/deepseek-harness/.env
+set +a
+pnpm dsh web
 ```
 
 未设置 `E2E_SESSION_ID` 时，冒烟脚本会随机生成纯数字雪花 `session_id`；如需继续已有 ByAI 会话，则把现有数字雪花 ID 写入 `E2E_SESSION_ID`。
