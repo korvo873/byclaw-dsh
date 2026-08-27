@@ -5,7 +5,7 @@ ARG NVM_VERSION=0.40.3
 ARG NODE_VERSION=22.19.0
 ARG PNPM_VERSION=11.7.0
 ARG DSH_REPOSITORY=https://github.com/deepseek-ai/deepseek-harness.git
-ARG DSH_REF=main
+ARG DSH_REF=master
 # 基础镜像尚未安装 ca-certificates，先用 HTTP 引导安装证书；APT 仍校验仓库签名。
 ARG APT_MIRROR=http://mirrors.aliyun.com
 
@@ -97,7 +97,9 @@ RUN git clone --depth 1 --branch "v${NVM_VERSION}" \
     && nvm install "${NODE_VERSION}" \
     && nvm alias default "${NODE_VERSION}" \
     && ln -s "${NVM_DIR}/versions/node/v${NODE_VERSION}" "${NVM_DIR}/current" \
-    && npm install --global "pnpm@${PNPM_VERSION}" \
+    && npm install --global \
+        "pnpm@${PNPM_VERSION}" \
+        @colbymchenry/codegraph@1.6.0 \
     && npm cache clean --force \
     && chown -R byclaw:byclaw "${NVM_DIR}"
 
@@ -118,10 +120,16 @@ RUN rmdir /workspace \
 # 将本项目维护的插件复制到 DSH 工作区
 COPY --chown=byclaw:byclaw plugins/ /workspace/plugins/
 
+# 远程 DSH master 可能尚未把外部插件目录加入 pnpm workspace
+RUN if ! grep -qxF '  - plugins/*' /workspace/pnpm-workspace.yaml; then \
+        sed -i '/^linkWorkspacePackages:/i\  - plugins/*\n' /workspace/pnpm-workspace.yaml; \
+    fi
+
 WORKDIR /workspace
 
 # 安装 DSH 与插件依赖，并构建运行所需产物
-RUN pnpm install --no-frozen-lockfile \
+RUN pnpm config set registry "${NPM_CONFIG_REGISTRY}" \
+    && pnpm install --no-frozen-lockfile \
     && pnpm run build \
     && pnpm --filter @byclaw/dsh-agent-teams run build \
     && pnpm --filter @byclaw/dsh-integration run build \
