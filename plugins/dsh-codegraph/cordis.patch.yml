@@ -6,7 +6,7 @@
         transport: stdio
         command: !!js process.env.CODEGRAPH_COMMAND || 'codegraph'
         args: ['serve', '--mcp']
-        cwd: !!js process.cwd()
+        cwd: !!js process.env.CODEGRAPH_MCP_CWD || process.cwd()
         env: {}
         toolCallTimeoutMs: 60000
         failOnStartupError: true

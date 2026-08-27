@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import yaml from 'js-yaml'
 import { codeGraphPolicy } from '../lib/index.js'
 
 const policy = codeGraphPolicy()
@@ -17,5 +18,20 @@ assert.match(patch, /command: !!js process\.env\.CODEGRAPH_COMMAND \|\| 'codegra
 assert.match(patch, /args: \['serve', '--mcp'\]/u)
 assert.match(patch, /id: dsh-codegraph/u)
 assert.match(patch, /name: '@byclaw\/dsh-codegraph'/u)
+
+const JsExpr = new yaml.Type('tag:yaml.org,2002:js', {
+  kind: 'scalar',
+  construct: expression => ({ expression }),
+})
+const parsedPatch = yaml.load(patch, { schema: yaml.JSON_SCHEMA.extend(JsExpr) })
+const mcpEntry = parsedPatch[0].insert.find(entry => entry.id === 'codegraph-mcp')
+const cwdExpression = mcpEntry.config.cwd.expression
+const evaluateCwd = (env, fallbackCwd) => Function(
+  'process',
+  `return (${cwdExpression})`,
+)({ env, cwd: () => fallbackCwd })
+
+assert.equal(evaluateCwd({ CODEGRAPH_MCP_CWD: '/' }, '/workspace'), '/')
+assert.equal(evaluateCwd({}, '/workspace'), '/workspace')
 
 console.info('ByClaw CodeGraph plugin verification passed')

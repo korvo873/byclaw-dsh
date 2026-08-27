@@ -18,7 +18,7 @@ dsh --profile web --dump-config
 
 The effective tree must contain `codegraph-mcp` and `dsh-codegraph`. The default MCP command is `codegraph serve --mcp`; set `CODEGRAPH_COMMAND` when the executable is not on `PATH`, or override the complete `codegraph-mcp.config` in the profile patch.
 
-The policy requires every CodeGraph call to pass the Agent's authoritative current-runtime cwd as `projectPath`. The MCP process cwd is not a project selection mechanism. If the MCP process cannot start or synchronize tools, plugin loading fails rather than leaving a misleading prompt without tools.
+The policy requires every CodeGraph call to pass the Agent's authoritative current-runtime cwd as `projectPath`. The MCP process cwd is not a project selection mechanism. Set `CODEGRAPH_MCP_CWD` to a neutral directory such as `/` in a container to avoid scanning the DSH installation directory for a default project; per-call `projectPath` selection continues to work normally. If the MCP process cannot start or synchronize tools, plugin loading fails rather than leaving a misleading prompt without tools.
 
 ## Verification
 

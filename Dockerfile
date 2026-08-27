@@ -21,6 +21,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DSH_HOME=/home/byclaw/.dsh \
+    CODEGRAPH_MCP_CWD=/ \
     PATH=/opt/nvm/current/bin:/usr/local/bin:$PATH
 
 # 创建非 root 用户
