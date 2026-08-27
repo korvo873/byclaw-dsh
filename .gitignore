@@ -5,4 +5,5 @@ lib/
 coverage/
 *.tsbuildinfo
 .agent-teams/
+.idea
 .worktrees/
