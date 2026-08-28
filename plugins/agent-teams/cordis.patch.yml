@@ -19,3 +19,5 @@
         stateDir: .agent-teams
         # Provider used to spawn member subagents ('spawn' or 'fork').
         memberProvider: spawn
+        # Expert-team leaders run at depth 1, so members require depth 2.
+        memberMaxDepth: 2
