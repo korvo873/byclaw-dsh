@@ -88,11 +88,15 @@ async function streamUntilTerminal(traceId) {
       const text = deltaText(event.data)
       if (text && eventType === 'answerDelta') answer += text
       if (text && eventType === 'reasoningLogDelta') reasoning += text
-      if (text && eventType === 'reasoningLogDelta') {
+      if (text) {
         const card = parseJsonObject(text)
-        const contentType = String(event.data?.content_type ?? '')
-        if (card !== undefined && contentType === '3015') sessionCards.push(card)
-        if (card !== undefined && contentType === '3016') teamCards.push(card)
+        const contentType = String(event.data?.contentType ?? event.data?.content_type ?? '')
+        if (event.metadata?.dsh_scope === 'child' && (contentType === '3009' || contentType === '1002')) {
+          sessionCards.push({ contentType, text, metadata: event.metadata })
+        }
+        if (card !== undefined && contentType === '3015' && card.eventKind === 'agent-teams/snapshot') {
+          teamCards.push(card)
+        }
       }
       if (eventType === 'error') throw new Error(String(event.metadata?.error || event.state_msg || 'worker error'))
       if (eventType === 'appStreamResponse') {

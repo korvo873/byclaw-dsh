@@ -1,0 +1,208 @@
+/** Native ByClaw frontend projections for DSH session activity. */
+
+import { EventType } from '@byclaw/by-framework'
+import type { DshSessionEventKind, DshSessionStatus } from './protocol.ts'
+
+export type DshProjectionScope = 'parent' | 'child' | 'team'
+
+export interface DshProjectionContext {
+  sessionId: string
+  parentSessionId?: string
+  rootSessionId: string
+  externalParentSessionId: string
+  scope: DshProjectionScope
+  depth: number
+  sequence: number | string
+  eventKind: DshSessionEventKind
+  status?: DshSessionStatus
+  childName?: string
+  childTask?: string
+  parentMessageId: string
+  messageIdPrefix?: string
+}
+
+export interface ByClawProjectionOptions {
+  eventType: EventType | string
+  contentType: string
+  sourceAgentType?: string
+  messageId: string
+  parentMessageId: string
+  metadata: Record<string, unknown>
+  objectType?: string
+  status?: string
+}
+
+export interface ByClawProjection {
+  content: string
+  options: ByClawProjectionOptions
+}
+
+function metadata(context: DshProjectionContext): Record<string, unknown> {
+  return {
+    dsh_event: context.eventKind,
+    dsh_scope: context.scope,
+    dsh_session_id: context.sessionId,
+    ...(context.parentSessionId === undefined ? {} : { parent_dsh_session_id: context.parentSessionId }),
+    root_dsh_session_id: context.rootSessionId,
+    external_parent_session_id: context.externalParentSessionId,
+    delegation_depth: context.depth,
+    dsh_sequence: String(context.sequence),
+    ...(context.status === undefined ? {} : { dsh_status: context.status }),
+    ...(context.childName === undefined ? {} : { child_name: context.childName }),
+    ...(context.childTask === undefined ? {} : { child_task: context.childTask }),
+  }
+}
+
+function eventMessageId(context: DshProjectionContext): string {
+  return `${context.messageIdPrefix ?? `dsh:${context.sessionId}`}:event:${context.sequence}`
+}
+
+function textProjection(
+  text: string,
+  contentType: '1001' | '1002',
+  eventType: EventType,
+  context: DshProjectionContext,
+): ByClawProjection {
+  return {
+    content: text,
+    options: {
+      eventType,
+      contentType,
+      messageId: eventMessageId(context),
+      parentMessageId: context.parentMessageId,
+      metadata: metadata(context),
+    },
+  }
+}
+
+/** Render DSH thinking/context text in ByClaw's existing reasoning area. */
+export function reasoningProjection(text: string, context: DshProjectionContext): ByClawProjection {
+  return textProjection(text, '1001', EventType.REASONING_LOG_DELTA, context)
+}
+
+/** Render child-Agent output without mixing it into the root final answer. */
+export function childOutputProjection(text: string, context: DshProjectionContext): ByClawProjection {
+  return textProjection(text, '1002', EventType.ANSWER_DELTA, context)
+}
+
+export interface DshToolProjection {
+  phase: 'start' | 'success' | 'error'
+  toolCallId: string
+  toolName?: string
+  input?: unknown
+  output?: unknown
+  description?: string
+}
+
+function toolStatus(phase: DshToolProjection['phase']): '_START_' | '_DONE_' | '_ERROR_' {
+  if (phase === 'start') return '_START_'
+  return phase === 'error' ? '_ERROR_' : '_DONE_'
+}
+
+/** Render both halves of one DSH tool call with a stable ByClaw order/message id. */
+export function toolCallProjection(tool: DshToolProjection, context: DshProjectionContext): ByClawProjection {
+  const status = toolStatus(tool.phase)
+  return {
+    content: JSON.stringify({
+      ...(tool.toolName === undefined ? {} : { title: tool.toolName }),
+      ...(tool.input === undefined ? {} : { input: tool.input }),
+      ...(tool.output === undefined ? {} : { output: tool.output }),
+      status,
+      ...(tool.description === undefined ? {} : { description: tool.description }),
+    }),
+    options: {
+      eventType: EventType.REASONING_LOG_DELTA,
+      contentType: '3015',
+      objectType: 'tool_call',
+      messageId: tool.toolCallId,
+      parentMessageId: context.parentMessageId,
+      status,
+      metadata: metadata(context),
+    },
+  }
+}
+
+export interface DshStatusProjection {
+  title: string
+  status: DshSessionStatus
+}
+
+export interface DshTeamSnapshot {
+  teamId: string
+  name?: string
+  captainSessionId: string
+  members?: readonly unknown[]
+  tasks?: readonly unknown[]
+}
+
+export interface DshTeamSnapshotOptions {
+  archived: boolean
+  capturedAt: string
+}
+
+/** Render AgentTeams state through ByClaw's supported 3015 tool-call card. */
+export function teamSnapshotProjection(
+  team: DshTeamSnapshot,
+  snapshot: DshTeamSnapshotOptions,
+  context: DshProjectionContext,
+): ByClawProjection {
+  const status = snapshot.archived ? '_DONE_' : '_START_'
+  const memberCount = Array.isArray(team.members) ? team.members.length : 0
+  const taskCount = Array.isArray(team.tasks) ? team.tasks.length : 0
+  return {
+    content: JSON.stringify({
+      title: `Agent Team · ${team.name ?? team.teamId}`,
+      input: {
+        members: memberCount,
+        tasks: taskCount,
+      },
+      ...(snapshot.archived ? { output: { members: memberCount, tasks: taskCount } } : {}),
+      status,
+      description: `${memberCount} members · ${taskCount} tasks`,
+      source: 'DSH',
+      schemaVersion: 2,
+      eventKind: 'agent-teams/snapshot',
+      team,
+      archived: snapshot.archived,
+      capturedAt: snapshot.capturedAt,
+    }),
+    options: {
+      eventType: EventType.REASONING_LOG_DELTA,
+      contentType: '3015',
+      objectType: 'tool_call',
+      messageId: `${context.messageIdPrefix ?? `dsh:${context.sessionId}`}:team:${team.teamId}`,
+      parentMessageId: context.parentMessageId,
+      status,
+      metadata: {
+        ...metadata(context),
+        team_id: team.teamId,
+        archived: snapshot.archived,
+      },
+    },
+  }
+}
+
+function sessionStatus(status: DshSessionStatus): '_START_' | '_DONE_' | '_ERROR_' {
+  if (status === 'completed') return '_DONE_'
+  return status === 'failed' ? '_ERROR_' : '_START_'
+}
+
+/** Render one child session as a stateful 3009 status node. */
+export function sessionStatusProjection(
+  session: DshStatusProjection,
+  context: DshProjectionContext,
+): ByClawProjection {
+  const status = sessionStatus(session.status)
+  return {
+    content: session.title,
+    options: {
+      eventType: EventType.REASONING_LOG_DELTA,
+      contentType: '3009',
+      objectType: 'tool_call',
+      messageId: context.messageIdPrefix ?? `dsh:${context.sessionId}`,
+      parentMessageId: context.parentMessageId,
+      status,
+      metadata: metadata(context),
+    },
+  }
+}

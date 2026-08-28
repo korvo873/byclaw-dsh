@@ -38,8 +38,7 @@ import {
 import {
   ByClawQuestionBroker,
   askUserQuestionsCard,
-  dshAgentTeamsSnapshotCard,
-  dshSessionEventCard,
+  dshAgentTeamsSnapshotEventId,
   extractByClawUserText,
   parseDshInteractionResponse,
   selectOwnedTeamSnapshots,
@@ -47,6 +46,15 @@ import {
   type DshSessionEventKind,
   type DshSessionStatus,
 } from './protocol.ts'
+import {
+  childOutputProjection,
+  reasoningProjection,
+  sessionStatusProjection,
+  teamSnapshotProjection,
+  toolCallProjection,
+  type ByClawProjection,
+  type DshProjectionContext,
+} from './byclaw-presentation.ts'
 
 export interface ByClawDshSessionRuntimeOptions {
   workspace: string
@@ -1042,45 +1050,62 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     } = {},
   ): Promise<void> {
     const sessionId = String(session.id)
+    const root = sessionId === turn.rootSessionId
     const messageId = this.externalMessageId(turn, sessionId)
-    const parentSessionId = String(session.header.parentSession ?? turn.rootSessionId)
-    const parentMessageId = this.externalMessageId(turn, parentSessionId)
-    const presentation = sessionId === turn.rootSessionId
+    const parentSessionId = root ? undefined : String(session.header.parentSession ?? turn.rootSessionId)
+    const parentMessageId = root
+      ? turn.rootMessageId
+      : this.externalMessageId(turn, parentSessionId ?? turn.rootSessionId)
+    const presentation = root
       ? { label: turn.rootLabel }
       : dshChildPresentation(session, this.options.agentTemplateDir)
-    const card = dshSessionEventCard({
-      eventId: `${sessionId}:${sequence}`,
+    const projectionContext = (detailParentMessageId: string): DshProjectionContext => ({
       eventKind,
       sessionId,
-      parentSessionId,
+      ...(parentSessionId === undefined ? {} : { parentSessionId }),
+      rootSessionId: turn.rootSessionId,
+      externalParentSessionId: turn.context.sessionId,
+      scope: root ? 'parent' : 'child',
       depth: session.header.delegationDepth ?? 0,
-      ...presentation,
+      sequence,
       status,
-      occurredAt: new Date().toISOString(),
-      summary,
-      ...details,
+      ...(root ? {} : { childName: presentation.label }),
+      ...(root || presentation.task === undefined ? {} : { childTask: presentation.task }),
+      parentMessageId: detailParentMessageId,
+      messageIdPrefix: messageId,
     })
-    await this.options.emitter.emitEvent({
-      sessionId: turn.context.sessionId,
-      traceId: turn.context.traceId,
-      eventType: EventType.REASONING_LOG_DELTA,
-      sourceAgentType: this.options.sourceAgentType,
-      messageId: `${messageId}:event:${sequence}`,
-      parentMessageId,
-      data: {
-        choices: [{ delta: { content: card.content } }],
-        content_type: card.contentType,
-        status: '_DONE_',
-        order_id: `${messageId}:event:${sequence}`,
-        parent_order_id: parentMessageId,
+    let projection: ByClawProjection
+    if (eventKind === 'session.created' || eventKind === 'session.status' || eventKind === 'session.error') {
+      projection = sessionStatusProjection({
+        title: `${presentation.label} · ${summary}`,
+        status,
+      }, projectionContext(parentMessageId))
+    } else if (eventKind === 'tool.call' || eventKind === 'tool.result') {
+      projection = toolCallProjection({
+        phase: eventKind === 'tool.call' ? 'start' : details.isError === true ? 'error' : 'success',
+        toolCallId: details.toolCallId ?? `${messageId}:tool:${sequence}`,
+        toolName: details.toolName,
+        ...(eventKind === 'tool.call' && details.arguments !== undefined ? { input: details.arguments } : {}),
+        ...(eventKind === 'tool.result' && details.result !== undefined ? { output: details.result } : {}),
+        description: summary,
+      }, projectionContext(messageId))
+    } else if (eventKind === 'session.output') {
+      projection = childOutputProjection(details.text ?? summary, projectionContext(messageId))
+    } else {
+      const text = eventKind === 'context' && details.text !== undefined
+        ? `${summary}\n${details.text}`
+        : details.text ?? summary
+      projection = reasoningProjection(text, projectionContext(messageId))
+    }
+    await this.options.emitter.emitChunk(
+      turn.context.sessionId,
+      turn.context.traceId,
+      projection.content,
+      {
+        ...projection.options,
+        sourceAgentType: this.options.sourceAgentType,
       },
-      metadata: {
-        dsh_event: 'subagent/session',
-        dsh_session_id: sessionId,
-        parent_dsh_session_id: parentSessionId,
-        delegation_depth: session.header.delegationDepth ?? 0,
-      },
-    })
+    )
   }
 
   private async emitPlan(turn: ActiveTurn, todos: TodoItem[]): Promise<void> {
@@ -1091,7 +1116,13 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
       sourceAgentType: this.options.sourceAgentType,
       messageId: `${turn.rootMessageId}:plan`,
       parentMessageId: turn.rootMessageId,
-      metadata: { dsh_event: 'todo/write', dsh_session_id: turn.rootSessionId },
+      metadata: {
+        dsh_event: 'todo/write',
+        dsh_scope: 'parent',
+        dsh_session_id: turn.rootSessionId,
+        root_dsh_session_id: turn.rootSessionId,
+        external_parent_session_id: turn.context.sessionId,
+      },
     })
   }
 
@@ -1116,33 +1147,34 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     }
     for (const [snapshots, isArchived] of [[live, false], [archived, true]] as const) {
       for (const team of selectOwnedTeamSnapshots(snapshots, ownsCaptain)) {
-        const card = dshAgentTeamsSnapshotCard(team, {
+        const eventId = dshAgentTeamsSnapshotEventId(team, isArchived)
+        if (turn.emittedTeamSnapshots.has(eventId)) continue
+        turn.emittedTeamSnapshots.add(eventId)
+        const projection = teamSnapshotProjection(team, {
           archived: isArchived,
           capturedAt: new Date().toISOString(),
-        })
-        if (turn.emittedTeamSnapshots.has(card.eventId)) continue
-        turn.emittedTeamSnapshots.add(card.eventId)
-        await this.options.emitter.emitEvent({
-          sessionId: turn.context.sessionId,
-          traceId: turn.context.traceId,
-          eventType: EventType.REASONING_LOG_DELTA,
-          sourceAgentType: this.options.sourceAgentType,
-          messageId: `${turn.rootMessageId}:team:${card.eventId}`,
+        }, {
+          sessionId: team.captainSessionId,
+          ...(team.captainSessionId === turn.rootSessionId ? {} : { parentSessionId: turn.rootSessionId }),
+          rootSessionId: turn.rootSessionId,
+          externalParentSessionId: turn.context.sessionId,
+          scope: 'team',
+          depth: team.captainSessionId === turn.rootSessionId ? 0 : 1,
+          sequence: eventId,
+          eventKind: 'agent-teams/snapshot',
+          status: isArchived ? 'completed' : 'running',
           parentMessageId: turn.rootMessageId,
-          data: {
-            choices: [{ delta: { content: card.content } }],
-            content_type: card.contentType,
-            status: '_DONE_',
-            order_id: `${turn.rootMessageId}:team:${card.eventId}`,
-            parent_order_id: turn.rootMessageId,
-          },
-          metadata: {
-            dsh_event: 'agent-teams/snapshot',
-            dsh_session_id: team.captainSessionId,
-            team_id: team.teamId,
-            archived: isArchived,
-          },
+          messageIdPrefix: turn.rootMessageId,
         })
+        await this.options.emitter.emitChunk(
+          turn.context.sessionId,
+          turn.context.traceId,
+          projection.content,
+          {
+            ...projection.options,
+            sourceAgentType: this.options.sourceAgentType,
+          },
+        )
       }
     }
   }
