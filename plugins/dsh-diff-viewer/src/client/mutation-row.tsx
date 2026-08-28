@@ -14,7 +14,8 @@ import clsx from 'clsx'
 import {
   DisclosureRow, IconEditOutline16, IconInspectOutline12, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ToolCallBlock, ToolResultNode } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ToolCallBlock, ToolResultNode } from '@deepseek-ai/dsh-client-ui-chat/client'
+import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
 // The stock row's stylesheet, imported through the package's exported src
 // subpath and inlined — the takeover row renders with the exact stock chrome.
 import rowCss from '@deepseek-ai/dsh-client-ui-tool/src/client/tool/components/ToolRow.module.css'
@@ -116,14 +117,7 @@ function stateStatus(state: ToolRowState): string | null {
 }
 
 /** Full props of the taken-over row (the stock ToolCallOwnerProps currency). */
-export interface MutationRowProps {
-  callId: string
-  toolName: string
-  block: ToolCallBlock
-  cwd?: string | undefined
-  openFile: (path: string) => void
-  inspect?: (() => void) | undefined
-}
+export type MutationRowProps = ToolCallViewProps
 
 /**
  * Whether a row card opens by default: a settled, successful `edit` result

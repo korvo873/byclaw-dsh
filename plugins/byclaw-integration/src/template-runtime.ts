@@ -5,6 +5,7 @@ import { installModelSelection, type Agent, type ModelSelection } from '@deepsee
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { PERSONA_ORDER } from '@deepseek-ai/dsh-system-prompt'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -15,6 +16,13 @@ import {
   foldByClawSessionWorkspace,
   registerByClawAgentWorkspacePolicy,
 } from './session-workspace.ts'
+
+const BYCLAW_FILE_PREVIEW_PREFIX = '{{file_preview_prefix}}'
+
+/** Preserve the ByClaw frontend placeholder through DSH's strict one-pass renderer. */
+function installByClawPromptVariables(agentCtx: Context): () => void {
+  return agentCtx.systemPrompt.variable('file_preview_prefix', () => BYCLAW_FILE_PREVIEW_PREFIX)
+}
 
 const TEMPLATE_LABEL_PREFIX = 'byclaw-template:'
 
@@ -113,6 +121,12 @@ export function concludeParentForTemplateInstance(
 }
 
 export interface ByClawTemplateInstanceRuntime {
+  /** Compose an authorized template as the inbound root Agent itself. */
+  prepareRoot(templateId: string): Promise<{
+    templateId: string
+    selection: ModelSelection
+    setup(agentCtx: Context): void
+  }>
   /** Start a new template child with a caller-owned deterministic child id. */
   instantiate(
     parent: Agent,
@@ -170,6 +184,7 @@ export function registerAgentTemplateRuntime(ctx: Context, config: {
         ? undefined
         : { provider: descriptor.agentProvider, model: descriptor.agentModel })
     const installedSkills = installTemplateSkills(childCtx, template)
+    const disposePromptVariables = installByClawPromptVariables(childCtx)
     console.info(
       `[byclaw-dsh] 🧩 加载会话 Skills (session=${child.id}, template=${template.id}, source=byclaw, count=${installedSkills.entries.length}): ${JSON.stringify(installedSkills.entries)}`,
     )
@@ -184,6 +199,7 @@ export function registerAgentTemplateRuntime(ctx: Context, config: {
     return () => {
       disposePolicy()
       installedSkills.dispose()
+      disposePromptVariables()
       disposeModel()
       disposeWorkspace()
     }
@@ -242,6 +258,45 @@ export function registerAgentTemplateRuntime(ctx: Context, config: {
   }
 
   const runtime: ByClawTemplateInstanceRuntime = {
+    async prepareRoot(templateId) {
+      await config.beforeInstantiate?.()
+      return withCatalogRead(async () => {
+        const template = await readAgentTemplate(config.catalogDir, templateId)
+        if (template === undefined) throw new Error(`agent template "${templateId}" was not found`)
+        if (!template.source.directlyAuthorized && template.kind === 'agent') {
+          throw new Error(`agent template "${templateId}" is available only through its authorized expert team`)
+        }
+        const selection = await config.resolveModel(`template:${template.id}`, template.source.modelId)
+        return {
+          templateId: template.id,
+          selection,
+          setup(agentCtx: Context): void {
+            const installedSkills = installTemplateSkills(agentCtx, template)
+            const disposePromptVariables = installByClawPromptVariables(agentCtx)
+            let disposePersona: (() => void) | undefined
+            try {
+              disposePersona = agentCtx.systemPrompt.section({
+                name: 'deployment:persona',
+                order: PERSONA_ORDER,
+                text: template.persona,
+              })
+            } catch (error: unknown) {
+              disposePromptVariables()
+              installedSkills.dispose()
+              throw error
+            }
+            agentCtx.effect(() => () => {
+              disposePersona?.()
+              disposePromptVariables()
+              installedSkills.dispose()
+            }, `byclaw-template-root:${template.id}`)
+            console.info(
+              `[byclaw-dsh] 🧩 加载会话 Skills (template=${template.id}, source=byclaw, count=${installedSkills.entries.length}): ${JSON.stringify(installedSkills.entries)}`,
+            )
+          },
+        }
+      })
+    },
     instantiate: startTemplate,
     async deliver(parent, templateId, task, childId, signal): Promise<Agent> {
       const persistence = (ctx as Context & {

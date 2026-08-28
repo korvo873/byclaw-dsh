@@ -714,20 +714,19 @@ describe('DiffViewer rendering', () => {
 describe('diffCardModel', () => {
   // Frozen call slices in the two lifecycle forms, shaped like the
   // conversation projection hands them to the toolview owner.
-  const running = (name: string, argsRaw: string, callView: unknown = null) => ({
-    callId: 'c1', name, argsRaw, turn: 1, step: 1, time: 0, callView, subCalls: [],
+  const running = (name: string, argsRaw: string) => ({
+    callId: 'c1', name, argsRaw, turn: 1, step: 1, time: 0, subCalls: [],
   })
-  const settled = (name: string, argsRaw: string, opts: { isError?: boolean; resultView?: unknown } = {}) => ({
+  const settled = (name: string, argsRaw: string, opts: { isError?: boolean; meta?: unknown } = {}) => ({
     kind: 'tool-result', seq: 1, time: 0, callId: 'c1',
     call: { name, argsRaw }, callTime: 0, content: [],
-    isError: opts.isError ?? false, callView: null,
-    resultView: opts.resultView ?? null, subCalls: [],
+    isError: opts.isError ?? false, meta: opts.meta, subCalls: [],
   })
 
-  it('keeps the wire call view for a running top-level call', () => {
-    const model = diffCardModel(running('edit', '{}', {
-      card: 'diff', diffs: [{ path: 'a.ts', oldText: 'x', newText: 'y' }],
-    }) as Parameters<typeof diffCardModel>[0])
+  it('derives the intended diff from a running top-level call', () => {
+    const model = diffCardModel(running('edit', JSON.stringify({
+      file_path: 'a.ts', old_string: 'x', new_string: 'y',
+    })) as Parameters<typeof diffCardModel>[0])
     expect(model).toEqual({ card: { diffs: [{ path: 'a.ts', oldText: 'x', newText: 'y' }] } })
   })
 
@@ -747,7 +746,7 @@ describe('diffCardModel', () => {
 
   it('keeps the applied result hunks for a settled top-level call', () => {
     const model = diffCardModel(settled('edit', '{}', {
-      resultView: { card: 'diff', diffs: [{ path: 'a.ts', oldText: 'old', newText: 'new' }] },
+      meta: { diffs: [{ path: 'a.ts', oldText: 'old', newText: 'new' }] },
     }) as Parameters<typeof diffCardModel>[0])
     expect(model).toEqual({ card: { diffs: [{ path: 'a.ts', oldText: 'old', newText: 'new' }] } })
   })

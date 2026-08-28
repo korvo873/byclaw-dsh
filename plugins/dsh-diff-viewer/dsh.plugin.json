@@ -5,7 +5,7 @@
   "client": {
     "main": "./lib/client.js",
     "inject": [
-      "@deepseek-ai/dsh-client-runtime"
+      "@deepseek-ai/dsh-client-ui-tool"
     ]
   },
   "engines": {

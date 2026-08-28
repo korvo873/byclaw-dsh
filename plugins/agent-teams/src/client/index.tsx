@@ -1,17 +1,20 @@
 /** Browser plugin for the AgentTeams activity floater and conversation card. */
 
-import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { createRoot } from 'react-dom/client'
 // Module-loading import: the card registers into the conversation chat-node
 // slot, whose keyed renderer map lives in the ui-conversation contract.
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { ActivityPanel } from './ActivityPanel.tsx'
 import { AgentTeamsCard, type AgentTeamsCardInjected } from './AgentTeamsCard.tsx'
 import { ExpertTeamDock, type ExpertTeamDockInjected } from './ExpertTeamDock.tsx'
 import { registerAgentTeamsConversationDefinition } from './registration.ts'
 
 /** Required services: conversation nodes, slots, and sessions navigation. */
-export const inject = ['conversationEvents', 'slots', 'sessions']
+export const inject = ['uiConversation', 'slots', 'sessions']
 
 /**
  * Mount the floater through a body portal (the web shell has no top-right

@@ -17,8 +17,7 @@
  * src/client/index.tsx source — only the registered id and the output file
  * name differ, so they cannot drift:
  * - externals resolve through the loader module table at runtime (the
- *   PLATFORM_MODULES seed list from apps/web's platform.ts, plus the
- *   runtime/client exemption),
+ *   PLATFORM_MODULES seed list from the web shell),
  * - everything else is inlined into the bundle (xterm, clsx, ...),
  * - the purity gate rejects any other @deepseek-ai value import: cross-plugin
  *   collaboration goes through cordis services, never value imports,
@@ -55,16 +54,16 @@ const NODE_BUILTINS = new Set([
   ...builtinModules.map(id => `node:${id}`),
 ])
 
-/** Module specifiers the web shell shares into the frozen module table (the official PLATFORM_MODULES list, plus the runtime/client exemption). */
+/** Module specifiers the web shell shares into the frozen module table (the official PLATFORM_MODULES list). */
 const CLIENT_EXTERNALS = [
   'react',
   'react/jsx-runtime',
   'react-dom',
   'react-dom/client',
-  'cordis',
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-runtime/client',
 ]
 
 /**

@@ -3,10 +3,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
-import { SessionId, type Session, type SessionEvent, type TodoItem } from '@deepseek-ai/dsh-session'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import * as ToolTodo from '@deepseek-ai/dsh-tool-todo'
+import type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   EventType,
@@ -15,7 +16,6 @@ import {
   type GatewayDataEmitter,
   type ResumeCommand,
 } from '@byclaw/by-framework'
-import { createHash } from 'node:crypto'
 import { isAbsolute, join, resolve } from 'node:path'
 import {
   collectArchivedTeamsActivity,
@@ -27,10 +27,13 @@ import { readAgentTemplateSync } from './agent-template.ts'
 import type { ByClawInboundTarget } from './inbound-routing.ts'
 import type { ByClawTemplateInstanceRuntime } from './template-runtime.ts'
 import {
-  appendByClawInboundUserMessage,
+  assertByClawRootBinding,
   byClawInboundText,
+  ensureByClawRootBinding,
   ensureByClawSessionWorkspace,
+  isLegacyByClawRootBindingCandidate,
   registerByClawAgentWorkspacePolicy,
+  type ByClawRootBinding,
 } from './session-workspace.ts'
 import {
   ByClawQuestionBroker,
@@ -67,6 +70,8 @@ interface ActiveTurn {
   responseSessionId: string
   rootMessageId: string
   direct: boolean
+  rootLabel: string
+  workspace: string
   announcedChildren: Set<string>
   emittedTeamSnapshots: Set<string>
   bufferedReasoning: Map<string, { sequence: number; text: string }>
@@ -74,20 +79,11 @@ interface ActiveTurn {
   toolNames: Map<string, string>
 }
 
-/** Prevent a direct ByClaw turn from waking the main Agent on child settlement. */
-export function shouldSuppressDirectSettlement(
-  direct: boolean,
-  messages: readonly UserMessage[],
-): boolean {
-  return direct
-    && messages.length > 0
-    && messages.every(message => message.source.kind === 'subagent-settled')
-}
-
 interface RootHandle {
   handle: AgentHandle
   selection: ModelSelectionRef
   mode: 'reuse' | 'resume' | 'create'
+  templateId?: string
 }
 
 /** Root-worker and target-agent coordinates carried by one ByClaw command. */
@@ -148,21 +144,11 @@ export function byClawRootSessionId(externalSessionId: string, userCode: string)
   return SessionId(externalSessionId)
 }
 
-/** Build a stable child identity for one direct ByClaw resource conversation. */
-export function byClawDirectTemplateSessionId(
-  userCode: string,
-  externalSessionId: string,
-  templateId: string,
-): SessionId {
-  const suffix = createHash('sha256')
-    .update(userCode)
-    .update('\0')
-    .update(externalSessionId)
-    .update('\0')
-    .update(templateId)
-    .digest('hex')
-    .slice(0, 32)
-  return SessionId(`byclaw-dsh-direct-v1-${suffix}`)
+/** Label the inbound root as the actual direct target rather than a relay Agent. */
+export function byClawRootPresentationLabel(
+  directTarget: Pick<ByClawInboundTarget, 'name'> | undefined,
+): string {
+  return directTarget?.name ?? '主 Agent'
 }
 
 /** Decide whether a ByClaw root Agent is reused, resumed, or created. */
@@ -407,45 +393,109 @@ export function installByClawTaskPlanTool(ctx: Context): void {
 /** Hold one ByClaw command across captain pause/wake turns until its temporary team is deleted. */
 export class ByClawAsyncTeamGate {
   waiting = false
-  failure: string | undefined
   completion: Promise<void> = Promise.resolve()
   private kind: 'team' | 'template' | undefined
   private teamActive = false
+  private startCallId: string | undefined
   private deleteCallId: string | undefined
   private templateCallId: string | undefined
   private templateReported = false
+  private failure: Error | undefined
   private resolveCompletion: (() => void) | undefined
+  private timeout: ReturnType<typeof setTimeout> | undefined
+
+  constructor(private readonly timeoutMs = 10 * 60 * 1000) {}
+
+  assertHealthy(): void {
+    if (this.failure !== undefined) throw this.failure
+  }
+
+  cancel(reason: string): void {
+    this.finish(new Error(`ByClaw async team/template gate was cancelled: ${reason}`))
+  }
+
+  private begin(kind: 'team' | 'template'): void {
+    if (this.waiting) return
+    this.waiting = true
+    this.kind = kind
+    this.failure = undefined
+    this.completion = new Promise(resolve => { this.resolveCompletion = resolve })
+    this.timeout = setTimeout(() => {
+      this.finish(new Error(`ByClaw ${kind} gate timed out after ${this.timeoutMs}ms without terminal cleanup`))
+    }, this.timeoutMs)
+    this.timeout.unref?.()
+  }
+
+  private finish(error?: Error): void {
+    if (!this.waiting) return
+    if (error !== undefined) this.failure = error
+    this.waiting = false
+    this.kind = undefined
+    if (this.timeout !== undefined) clearTimeout(this.timeout)
+    this.timeout = undefined
+    this.resolveCompletion?.()
+    this.resolveCompletion = undefined
+  }
+
+  private observeTeamCall(name: string, callId: string): boolean {
+    if (name === 'agent_teams_start') {
+      this.begin('team')
+      this.startCallId = callId
+      return true
+    }
+    if (name === 'agent_teams_delete') {
+      this.deleteCallId = callId
+      return true
+    }
+    return false
+  }
+
+  private observeTeamResult(name: string, callId: string, isError: boolean): boolean {
+    if (name === 'agent_teams_start' && this.startCallId === callId) {
+      this.startCallId = undefined
+      if (isError) this.finish(new Error('agent_teams_start failed; no expert team was activated'))
+      else this.teamActive = true
+      return true
+    }
+    if (name === 'agent_teams_delete' && this.deleteCallId === callId) {
+      this.deleteCallId = undefined
+      if (isError) this.finish(new Error('agent_teams_delete failed; expert team cleanup did not complete'))
+      else this.teamActive = false
+      return true
+    }
+    return false
+  }
 
   observe(event: SessionEvent): void {
-    if (event.type === 'tool/call' && event.data.name === 'agent_teams_start') {
-      if (!this.waiting) {
-        this.waiting = true
-        this.kind = 'team'
-        this.teamActive = true
-        this.completion = new Promise(resolve => { this.resolveCompletion = resolve })
-      }
+    if (event.type === 'tool/call' && this.observeTeamCall(event.data.name, String(event.data.callId))) {
       return
     }
+    if (event.type === 'tool/code-dispatch-start'
+      && this.observeTeamCall(event.data.name, String(event.data.subCallId))) return
     if (event.type === 'tool/call' && event.data.name === 'byclaw_instantiate_template') {
-      if (!this.waiting) {
-        this.waiting = true
-        this.kind = 'template'
-        this.templateReported = false
-        this.completion = new Promise(resolve => { this.resolveCompletion = resolve })
-      }
+      this.begin('template')
+      this.templateReported = false
       this.templateCallId = event.data.callId
       return
     }
-    if (event.type === 'tool/call' && event.data.name === 'agent_teams_delete') {
-      this.deleteCallId = event.data.callId
-      return
-    }
-    if (event.type === 'tool/result' && this.deleteCallId !== undefined) {
+    if (event.type === 'tool/result') {
       const result = event.data.message.content.find(block => (
-        block.type === 'tool-result' && block.toolCallId === this.deleteCallId
+        block.type === 'tool-result'
+        && (String(block.toolCallId) === this.startCallId || String(block.toolCallId) === this.deleteCallId)
       ))
-      if (result?.type === 'tool-result' && result.isError !== true) this.teamActive = false
-      this.deleteCallId = undefined
+      if (result?.type !== 'tool-result') return
+      const callId = String(result.toolCallId)
+      if (this.startCallId === callId) {
+        this.observeTeamResult('agent_teams_start', callId, event.data.error !== undefined || result.isError === true)
+        return
+      }
+      if (this.deleteCallId === callId) {
+        this.observeTeamResult('agent_teams_delete', callId, event.data.error !== undefined || result.isError === true)
+        return
+      }
+    }
+    if (event.type === 'tool/code-dispatch'
+      && this.observeTeamResult(event.data.name, String(event.data.subCallId), event.data.isError)) {
       return
     }
     if (event.type === 'tool/result' && this.templateCallId !== undefined) {
@@ -463,17 +513,11 @@ export class ByClawAsyncTeamGate {
     }
     if (event.type !== 'turn/end' || !this.waiting) return
     const completed = this.kind === 'team'
-      ? !this.teamActive
+      ? this.startCallId === undefined && !this.teamActive
       : this.templateReported && event.data.reason.kind === 'completed'
-    if (event.data.reason.kind === 'completed' && !completed && this.kind === 'team') {
-      this.failure = 'AgentTeams turn completed before agent_teams_delete settled'
-    }
-    if (event.data.reason.kind === 'error' || completed || this.failure !== undefined) {
-      this.waiting = false
-      this.kind = undefined
-      this.resolveCompletion?.()
-      this.resolveCompletion = undefined
-    }
+    if (event.data.reason.kind === 'error') {
+      this.finish(new Error(`ByClaw ${this.kind ?? 'async'} turn failed: ${event.data.reason.error.message}`))
+    } else if (completed) this.finish()
   }
 }
 
@@ -521,6 +565,7 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
 
   cancel(messageId: string, reason: string): void {
     const agent = this.messageAgents.get(messageId)
+    if (agent !== undefined) this.activeTurnFor(agent.session)?.teamGate.cancel(reason)
     agent?.cancel({ kind: 'hook', reason })
     if (agent !== undefined) this.questions.cancelSession(this.externalSessionOf(agent), reason)
   }
@@ -541,19 +586,23 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     if (directTarget?.text.trim() === '') {
       throw new Error(`ByClaw direct target "${directTarget.name}" requires a non-empty task`)
     }
-    const directChildSessionId = directTarget === undefined
-      ? undefined
-      : byClawDirectTemplateSessionId(command.header.userCode, route.externalRootSessionId, directTarget.templateId)
     console.info(
       `[byclaw-dsh] 📥 收到命令: type=AskAgentCommand, message_id=${command.header.messageId}, trace_id=${context.traceId}, session_id=${command.header.sessionId}`,
     )
-    const selection = await this.options.resolveModel(`root:${command.header.userCode}:${route.externalRootSessionId}`)
+    if (directTarget !== undefined && this.options.templateRuntime === undefined) {
+      throw new Error('ByClaw direct template routing is not configured')
+    }
+    const preparedRoot = directTarget === undefined
+      ? undefined
+      : await this.options.templateRuntime?.prepareRoot(directTarget.templateId)
+    const selection = preparedRoot?.selection
+      ?? await this.options.resolveModel(`root:${command.header.userCode}:${route.externalRootSessionId}`)
     const diagnostic = selection as ModelSelection & {
       sourceModelId?: string
       protocol?: string
       resolution?: string
     }
-    const entry = await this.handleFor(command, selection)
+    const entry = await this.handleFor(command, selection, preparedRoot)
     entry.selection.current = selection
     const rootAgent = entry.handle.agent
     const sessionWorkspace = ensureByClawSessionWorkspace(rootAgent.session, {
@@ -573,10 +622,10 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     console.info(
       `[byclaw-dsh] 🚀 启动任务 (session=${command.header.sessionId}, cwd=${rootAgent.session.header.cwd}): ${logText(text)}`,
     )
-    const responseSessionId = String(directChildSessionId ?? route.targetDshSessionId ?? rootAgent.id)
-    if (directTarget !== undefined && directChildSessionId !== undefined) {
+    const responseSessionId = String(route.targetDshSessionId ?? rootAgent.id)
+    if (directTarget !== undefined) {
       console.info(
-        `[byclaw-dsh] 🎯 入站直达 (resource=${directTarget.resourceId}, kind=${directTarget.kind}, template=${directTarget.templateId}, dsh_session=${directChildSessionId}, scope=direct)`,
+        `[byclaw-dsh] 🎯 入站直达 (resource=${directTarget.resourceId}, kind=${directTarget.kind}, template=${directTarget.templateId}, dsh_session=${rootAgent.id}, scope=direct-root)`,
       )
     }
     const turn: ActiveTurn = {
@@ -588,6 +637,8 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
       responseSessionId,
       rootMessageId: command.header.messageId,
       direct: directTarget !== undefined,
+      rootLabel: byClawRootPresentationLabel(directTarget),
+      workspace: sessionWorkspace.cwd,
       announcedChildren: new Set(),
       emittedTeamSnapshots: new Set(),
       bufferedReasoning: new Map(),
@@ -596,16 +647,18 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     }
     this.active.set(String(rootAgent.id), turn)
     try {
-      if (directTarget !== undefined) appendByClawInboundUserMessage(rootAgent.session, text)
       const agent = directTarget === undefined
         ? await this.deliverToSelectedAgent(rootAgent, route, byClawInboundText(text))
-        : await this.deliverToInboundTarget(rootAgent, directTarget, directChildSessionId as SessionId)
+        : (() => {
+            rootAgent.followup(createUserMessage({ content: [{ type: 'text', text: directTarget.text }], source: { kind: 'user' } }))
+            return rootAgent
+          })()
       this.messageAgents.set(command.header.messageId, agent)
       await agent.whenIdle()
       await turn.forwarding
       if (turn.teamGate.waiting) await turn.teamGate.completion
+      turn.teamGate.assertHealthy()
       await turn.forwarding
-      if (turn.teamGate.failure !== undefined) throw new Error(`DSH async settlement failed: ${turn.teamGate.failure}`)
       const failure = turnFailureMessage(agent.session.events)
       if (failure !== undefined) throw new Error(`DSH turn failed: ${failure}`)
       return {
@@ -654,30 +707,25 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     return target
   }
 
-  private async deliverToInboundTarget(
-    rootAgent: Agent,
-    target: ByClawInboundTarget,
-    childSessionId: SessionId,
-  ): Promise<Agent> {
-    if (this.options.templateRuntime === undefined) {
-      throw new Error('ByClaw direct template routing is not configured')
-    }
-    return this.options.templateRuntime.deliver(
-      rootAgent,
-      target.templateId,
-      target.text,
-      childSessionId,
-      new AbortController().signal,
-    )
-  }
-
-  private async handleFor(command: AskAgentCommand, selected: ModelSelection): Promise<RootHandle> {
+  private async handleFor(
+    command: AskAgentCommand,
+    selected: ModelSelection,
+    preparedRoot?: Awaited<ReturnType<ByClawTemplateInstanceRuntime['prepareRoot']>>,
+  ): Promise<RootHandle> {
     const route = byClawCommandSessionRoute(command)
     const externalRootSessionId = route.externalRootSessionId
+    const requestedBinding: ByClawRootBinding = preparedRoot === undefined
+      ? { kind: 'main' }
+      : { kind: 'template', templateId: preparedRoot.templateId }
     const key = `${command.header.userCode}\0${externalRootSessionId}`
     const existing = this.handles.get(key)
     if (existing !== undefined && this.ctx.agents.get(existing.handle.agent.id) === existing.handle.agent) {
       assertStableSessionCwd(externalRootSessionId, existing.handle.agent.session.header.cwd, route.cwd)
+      ensureByClawRootBinding(existing.handle.agent.session, requestedBinding, {
+        requireExisting: true,
+        allowLegacyMigration: true,
+        sessionId: externalRootSessionId,
+      })
       return { ...existing, mode: 'reuse' }
     }
     const sessionId = byClawRootSessionId(externalRootSessionId, command.header.userCode)
@@ -687,17 +735,14 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
         installModelSelection(agentCtx, selection)
         installByClawTaskPlanTool(agentCtx)
         registerByClawAgentWorkspacePolicy(agentCtx)
-        agentCtx.on('agent/pre-step', ({ agent, messages }, next) => {
-          const active = this.activeTurnFor(agent.session)
-          return shouldSuppressDirectSettlement(active?.direct === true, messages)
-            ? Promise.resolve({ kind: 'reject' as const })
-            : next()
-        })
-        agentCtx.systemPrompt.section({
-          name: 'byclaw-dsh:authorized-resources',
-          order: 116,
-          text: this.options.rosterPrompt,
-        })
+        preparedRoot?.setup(agentCtx)
+        if (preparedRoot === undefined) {
+          agentCtx.systemPrompt.section({
+            name: 'byclaw-dsh:authorized-resources',
+            order: 116,
+            text: this.options.rosterPrompt,
+          })
+        }
         agentCtx.tools.register(defineTool({
           name: 'ask_user_question',
           description: 'Ask the ByClaw user one or more concise questions and wait for the Resume answer.',
@@ -780,14 +825,32 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     }
     const live = this.ctx.agents.get(sessionId)
     const persistence = (this.ctx as Context & {
-      sessionPersistence: { list(): Promise<ReadonlyArray<{ id: string; cwd?: string }>> }
+      sessionPersistence: {
+        list(): Promise<ReadonlyArray<{ id: string; cwd?: string }>>
+        load(id: SessionId): Promise<{ events: readonly SessionEvent[] }>
+      }
     }).sessionPersistence
-    if (live !== undefined) assertStableSessionCwd(externalRootSessionId, live.session.header.cwd, route.cwd)
+    if (live !== undefined) {
+      assertStableSessionCwd(externalRootSessionId, live.session.header.cwd, route.cwd)
+      ensureByClawRootBinding(live.session, requestedBinding, {
+        requireExisting: true,
+        allowLegacyMigration: true,
+        sessionId: externalRootSessionId,
+      })
+    }
     const persistedHeader = live === undefined
       ? (await persistence.list()).find(header => header.id === sessionId)
       : undefined
     if (persistedHeader !== undefined) {
       assertStableSessionCwd(externalRootSessionId, persistedHeader.cwd, route.cwd)
+      const persistedSession = await persistence.load(sessionId)
+      const legacyBinding = isLegacyByClawRootBindingCandidate(persistedSession.events)
+      if (legacyBinding && requestedBinding.kind === 'template') {
+        throw new Error(`ByClaw legacy session ${externalRootSessionId} cannot safely infer a template binding; start a new ByClaw session`)
+      }
+      if (!legacyBinding) {
+        assertByClawRootBinding(persistedSession.events, requestedBinding, externalRootSessionId)
+      }
     }
     const persisted = persistedHeader !== undefined
     const mode = resolveRootSessionOpenMode(live !== undefined, persisted)
@@ -805,7 +868,17 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
             agentOptions: { provider: selected.provider, model: selected.model },
             setup,
           })
-    const entry = { handle, selection, mode }
+    ensureByClawRootBinding(handle.agent.session, requestedBinding, {
+      requireExisting: mode !== 'create',
+      allowLegacyMigration: mode !== 'create',
+      sessionId: externalRootSessionId,
+    })
+    const entry = {
+      handle,
+      selection,
+      mode,
+      ...preparedRoot === undefined ? {} : { templateId: preparedRoot.templateId },
+    }
     this.handles.set(key, entry)
     return entry
   }
@@ -973,7 +1046,7 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     const parentSessionId = String(session.header.parentSession ?? turn.rootSessionId)
     const parentMessageId = this.externalMessageId(turn, parentSessionId)
     const presentation = sessionId === turn.rootSessionId
-      ? { label: '主 Agent' }
+      ? { label: turn.rootLabel }
       : dshChildPresentation(session, this.options.agentTemplateDir)
     const card = dshSessionEventCard({
       eventId: `${sessionId}:${sequence}`,
@@ -1027,8 +1100,8 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
       captainSessionId === turn.rootSessionId || turn.announcedChildren.has(captainSessionId)
     )
     const roots = [{
-      workspace: this.options.workspace,
-      stateRoot: join(this.options.workspace, this.options.stateDir),
+      workspace: turn.workspace,
+      stateRoot: join(turn.workspace, this.options.stateDir),
     }]
     let live: TeamActivitySnapshot[]
     let archived: TeamActivitySnapshot[]

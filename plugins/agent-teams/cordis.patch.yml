@@ -21,3 +21,5 @@
         memberProvider: spawn
         # Expert-team leaders run at depth 1, so members require depth 2.
         memberMaxDepth: 2
+        # Build the complete DAG first; agent_teams_start atomically opens it.
+        controlledWorkflow: true

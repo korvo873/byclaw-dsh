@@ -186,13 +186,13 @@ function renderRow(row: SidechatTranscriptRow, labels: RowLabels): React.ReactNo
     case 'user':
       return (
         <div key={`${row.kind}:${row.seq}`} className={css.sidechatUser}>
-          <MarkdownText text={row.text} codeLabels={labels} />
+          <MarkdownText text={row.text} labels={{ code: labels, footnotes: 'Footnotes' }} />
         </div>
       )
     case 'assistant':
       return (
         <div key={`${row.kind}:${row.seq}`} className={css.sidechatAssistant}>
-          <MarkdownText text={row.text} codeLabels={labels} />
+          <MarkdownText text={row.text} labels={{ code: labels, footnotes: 'Footnotes' }} />
         </div>
       )
     case 'reasoning':

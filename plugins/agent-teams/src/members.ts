@@ -309,6 +309,9 @@ export function installMemberSelectionRuntime(ctx: Context, stateDir: string): M
     const member = pendingMembers.get(key)
       ?? (separator < 1 ? undefined : team?.members.find(candidate => candidate.name === identity.slice(separator + 1)))
     const disposeSkills = member === undefined ? () => undefined : installByClawMemberSkills(childCtx, member)
+    const disposeByClawPreviewPrefix = member?.source?.kind === 'byclaw-digital-employee'
+      ? childCtx.systemPrompt.variable('file_preview_prefix', () => '{{file_preview_prefix}}')
+      : () => undefined
     const disposeReportPolicy = childCtx.systemPrompt.section({
       name: 'agent-teams:report-policy',
       order: 119,
@@ -320,6 +323,7 @@ export function installMemberSelectionRuntime(ctx: Context, stateDir: string): M
     })
     return () => {
       disposeReportPolicy()
+      disposeByClawPreviewPrefix()
       disposeSkills()
       disposeSelection()
     }

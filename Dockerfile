@@ -145,10 +145,11 @@ RUN pnpm config set registry "${NPM_CONFIG_REGISTRY}" \
     && pnpm run build \
     && pnpm --filter @byclaw/dsh-trellis run test \
     && pnpm --filter @byclaw/dsh-agent-teams run build \
-    && pnpm --filter @byclaw/dsh-integration run build \
+    && pnpm --filter @byclaw/dsh-agent-teams run verify \
+    && pnpm --filter @byclaw/dsh-integration run verify \
     && pnpm --filter @byclaw/dsh-better-sidebar run build \
     && pnpm --filter @byclaw/dsh-diff-viewer run build \
-    && pnpm --filter @byclaw/dsh-codegraph run build
+    && pnpm --filter @byclaw/dsh-codegraph run verify
 
 # 将全部 ByClaw 插件加入默认 web profile，并在构建时确认 bundle 已生效
 RUN pnpm dsh plugin --profile web add \

@@ -1,5 +1,6 @@
 /** BYCLAW_DSH command bridge verification without Redis or a model. */
 
+import assert from 'node:assert/strict'
 import {
   AskAgentCommand,
   MessageHeader,
@@ -16,15 +17,14 @@ import * as dshProtocol from '../lib/protocol.js'
 import {
   ByClawAsyncTeamGate,
   ByClawDshSessionRuntime,
-  byClawDirectTemplateSessionId,
   byClawCommandSessionRoute,
+  byClawRootPresentationLabel,
   byClawRootSessionId,
   dshChildLabel,
   describeDshSessionEvent,
   installByClawTaskPlanTool,
   shouldForwardIncrementalChunk,
   resolveRootSessionOpenMode,
-  shouldSuppressDirectSettlement,
   turnFailureMessage,
 } from '../lib/session-runtime.js'
 import { Config, resolveWorkerAgentTypes, rosterPrompt } from '../lib/index.js'
@@ -111,6 +111,10 @@ if (taskPlanEvents[1]?.type !== 'todo/write' || taskPlanEvents[1]?.data.todos[0]
 if (byClawRootSessionId('external-session', 'adminvip') !== 'external-session') {
   throw new Error('ByClaw root session identity is not the inbound session id')
 }
+if (byClawRootPresentationLabel({ name: '内容创作专家团团长' }) !== '内容创作专家团团长'
+  || byClawRootPresentationLabel(undefined) !== '主 Agent') {
+  throw new Error('direct root Agent presentation did not preserve its target identity')
+}
 if (resolveRootSessionOpenMode(true, true) !== 'reuse'
   || resolveRootSessionOpenMode(false, true) !== 'resume'
   || resolveRootSessionOpenMode(false, false) !== 'create') {
@@ -118,11 +122,6 @@ if (resolveRootSessionOpenMode(true, true) !== 'reuse'
 }
 if (shouldForwardIncrementalChunk('reasoning') || !shouldForwardIncrementalChunk('answer')) {
   throw new Error('DSH reasoning chunks must be aggregated while answer chunks remain incremental')
-}
-if (!shouldSuppressDirectSettlement(true, [{ source: { kind: 'subagent-settled' } }])
-  || shouldSuppressDirectSettlement(false, [{ source: { kind: 'subagent-settled' } }])
-  || shouldSuppressDirectSettlement(true, [{ source: { kind: 'user' } }])) {
-  throw new Error('direct ByClaw turns must suppress only settlement-only parent wakeups')
 }
 if (dshChildLabel('agent-teams:rd-team:架构舵手', '/missing') !== '架构舵手') {
   throw new Error('AgentTeams member descriptor did not produce the visible member name')
@@ -266,12 +265,6 @@ if (!routingPrompt.includes('single employee is one ordinary child Agent')
   || !routingPrompt.includes('删除运行团队不删除 DSH 父子会话历史')) {
   throw new Error('template/team/session separation policy is absent from the main-agent prompt')
 }
-const directChildId = byClawDirectTemplateSessionId('adminvip', 'external-session', 'byclaw-employee-20010801')
-if (directChildId !== byClawDirectTemplateSessionId('adminvip', 'external-session', 'byclaw-employee-20010801')
-  || directChildId === byClawDirectTemplateSessionId('adminvip', 'external-session', 'byclaw-group-20010819')
-  || directChildId === byClawDirectTemplateSessionId('other-user', 'external-session', 'byclaw-employee-20010801')) {
-  throw new Error('direct template child session identity is not stable and isolated')
-}
 if (typeof templateRuntime.byClawTemplateUserText !== 'function'
   || templateRuntime.byClawTemplateUserText('  做自我介绍  ') !== '做自我介绍') {
   throw new Error('template instance user message is not the unchanged business task')
@@ -292,19 +285,49 @@ if (templateConclusions !== 1) {
   throw new Error('template dispatch did not conclude its successful tool result')
 }
 const asyncTeamGate = new ByClawAsyncTeamGate()
-asyncTeamGate.observe({ type: 'tool/call', data: { name: 'agent_teams_start' } })
+asyncTeamGate.observe({ type: 'tool/call', data: { name: 'agent_teams_start', callId: 'start-call' } })
 asyncTeamGate.observe({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
-await asyncTeamGate.completion
-if (asyncTeamGate.waiting || !asyncTeamGate.failure?.includes('delete')) {
-  throw new Error('completed captain turn without team cleanup did not settle as a failure')
+if (!asyncTeamGate.waiting) {
+  throw new Error('active team did not remain pending across a completed captain turn')
 }
+asyncTeamGate.observe({ type: 'tool/result', data: { message: { content: [{
+  type: 'tool-result', toolCallId: 'start-call', isError: false, content: [],
+}] } } })
 asyncTeamGate.observe({ type: 'tool/call', data: { name: 'agent_teams_delete', callId: 'delete-call' } })
 asyncTeamGate.observe({ type: 'tool/result', data: { message: { content: [{
   type: 'tool-result', toolCallId: 'delete-call', isError: false, content: [],
 }] } } })
 asyncTeamGate.observe({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
 await asyncTeamGate.completion
+asyncTeamGate.assertHealthy()
 if (asyncTeamGate.waiting) throw new Error('deleted temporary team did not complete the ByClaw turn')
+
+const failedStartGate = new ByClawAsyncTeamGate()
+failedStartGate.observe({ type: 'tool/code-dispatch-start', data: {
+  name: 'agent_teams_start', subCallId: 'code-start', arguments: {},
+} })
+failedStartGate.observe({ type: 'tool/code-dispatch', data: {
+  name: 'agent_teams_start', subCallId: 'code-start', isError: true, content: [],
+} })
+await failedStartGate.completion
+assert.throws(() => failedStartGate.assertHealthy(), /agent_teams_start failed/u)
+
+const timedOutGate = new ByClawAsyncTeamGate(5)
+timedOutGate.observe({ type: 'tool/code-dispatch-start', data: {
+  name: 'agent_teams_start', subCallId: 'code-start-ok', arguments: {},
+} })
+timedOutGate.observe({ type: 'tool/code-dispatch', data: {
+  name: 'agent_teams_start', subCallId: 'code-start-ok', isError: false, content: [],
+} })
+await new Promise(resolve => setTimeout(resolve, 10))
+await timedOutGate.completion
+assert.throws(() => timedOutGate.assertHealthy(), /timed out/u)
+
+const cancelledGate = new ByClawAsyncTeamGate()
+cancelledGate.observe({ type: 'tool/call', data: { name: 'agent_teams_start', callId: 'cancelled-start' } })
+cancelledGate.cancel('upstream request cancelled')
+await cancelledGate.completion
+assert.throws(() => cancelledGate.assertHealthy(), /was cancelled/u)
 
 const templateGate = new ByClawAsyncTeamGate()
 templateGate.observe({ type: 'tool/call', data: { name: 'byclaw_instantiate_template', callId: 'instantiate-call' } })

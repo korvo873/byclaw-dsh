@@ -3,6 +3,9 @@ import {
   appendByClawContext,
   appendByClawInboundUserMessage,
   byClawInboundText,
+  ensureByClawRootBinding,
+  foldByClawRootBinding,
+  isLegacyByClawRootBindingCandidate,
   registerByClawSessionEventType,
 } from '../lib/index.js'
 import * as dshSession from '@deepseek-ai/dsh-session'
@@ -31,6 +34,55 @@ assert.deepEqual(recordedInbound[0].options, { surfaceOp: 'append' })
 
 registerByClawSessionEventType()
 assert.equal(dshSession.KNOWN_SESSION_EVENT_TYPES.has('byclaw/session-workspace'), true)
+assert.equal(dshSession.KNOWN_SESSION_EVENT_TYPES.has('byclaw/root-binding'), true)
+
+const bindingEvents = []
+const bindingSession = {
+  events: bindingEvents,
+  append(type, data) { bindingEvents.push({ type, data }) },
+}
+assert.deepEqual(ensureByClawRootBinding(bindingSession, { kind: 'template', templateId: 'employee:20010801' }), {
+  kind: 'template', templateId: 'employee:20010801',
+})
+assert.deepEqual(foldByClawRootBinding(bindingEvents), {
+  kind: 'template', templateId: 'employee:20010801',
+})
+assert.throws(
+  () => ensureByClawRootBinding(bindingSession, { kind: 'main' }),
+  /already bound to template "employee:20010801"/u,
+)
+assert.throws(
+  () => ensureByClawRootBinding({ events: [], append() {} }, { kind: 'main' }, { requireExisting: true }),
+  /has no durable root binding/u,
+)
+
+const legacyEvents = [{ type: 'byclaw/session-workspace', data: workspace }]
+assert.equal(isLegacyByClawRootBindingCandidate(legacyEvents), true)
+const legacySession = {
+  events: legacyEvents,
+  append(type, data) { legacyEvents.push({ type, data }) },
+}
+assert.deepEqual(ensureByClawRootBinding(
+  legacySession,
+  { kind: 'main' },
+  { requireExisting: true, allowLegacyMigration: true },
+), { kind: 'main' })
+assert.throws(
+  () => ensureByClawRootBinding(
+    legacySession,
+    { kind: 'template', templateId: 'byclaw-group-20005111' },
+    { requireExisting: true, allowLegacyMigration: true },
+  ),
+  /already bound/u,
+)
+assert.throws(
+  () => ensureByClawRootBinding(
+    { events: [{ type: 'byclaw/session-workspace', data: workspace }], append() {} },
+    { kind: 'template', templateId: 'byclaw-employee-20010801' },
+    { requireExisting: true, allowLegacyMigration: true, sessionId: 'legacy-template' },
+  ),
+  /cannot safely infer a template binding; start a new ByClaw session/u,
+)
 
 const userMessage = {
   id: 'user-message',

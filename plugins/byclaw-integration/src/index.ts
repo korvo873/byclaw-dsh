@@ -3,6 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -36,6 +37,10 @@ import {
   ByClawDynamicModelRuntime,
   resolveByClawRedisModelsEnabled,
 } from './model-runtime.ts'
+import {
+  BYCLAW_DSH_WEB_AUTH_TOKEN_ENV,
+  overrideByClawWebAuthToken,
+} from './web-auth.ts'
 
 export { BYCLAW_DSH_AGENT_TYPE, DEFAULT_BYCLAW_BE_BASE_URL }
 export * from './types.ts'
@@ -49,6 +54,7 @@ export {
   decryptByClawAuthToken,
   resolveByClawRedisModelsEnabled,
 } from './model-runtime.ts'
+export { BYCLAW_DSH_WEB_AUTH_TOKEN_ENV, overrideByClawWebAuthToken } from './web-auth.ts'
 export type { ByClawModelFallback, ByClawModelRuntimeOptions, ByClawModelSelection } from './model-runtime.ts'
 
 export const name = 'byclaw-dsh'
@@ -199,6 +205,15 @@ export function resolveWorkerAgentTypes(configured: readonly string[] | undefine
 /** Activate resource synchronization and the by-framework Worker. */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   if (config.enabled !== true) return
+  const webAuthToken = process.env[BYCLAW_DSH_WEB_AUTH_TOKEN_ENV]
+  if (webAuthToken !== undefined) {
+    ctx.inject(['connection'], (connectionCtx) => {
+      connectionCtx.effect(
+        () => overrideByClawWebAuthToken(connectionCtx.connection, webAuthToken),
+        'byclaw-dsh.web-auth-token',
+      )
+    })
+  }
   registerByClawSessionEventType()
   const userCode = config.userCode?.trim() || process.env['USER_CODE']?.trim()
   if (userCode === undefined || userCode === '') throw new Error('byclaw-dsh requires config.userCode or USER_CODE')

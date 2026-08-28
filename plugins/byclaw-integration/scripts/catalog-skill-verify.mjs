@@ -142,6 +142,17 @@ try {
   if (cached?.metadata.version !== 'v1' || !(await readFile(cached.skillFile, 'utf8')).includes('boundaries')) {
     throw new Error('atomic Skill cache did not preserve content and metadata')
   }
+  try {
+    await syncByClawSkill({
+      ref: { id: 'slow', code: 'slow-skill', type: 'hub', versionUrl: '/slow-version', downloadUrl: '/slow.zip' },
+      baseUrl: 'http://byclaw.test', headers: {}, cacheRoot: join(root, 'cache'),
+      fetchImpl: async () => { throw new DOMException('timed out', 'TimeoutError') },
+    })
+    throw new Error('timed-out Skill metadata request was accepted')
+  } catch (error) {
+    const detail = String(error)
+    if (!detail.includes('slow-skill') || !detail.includes('version request')) throw error
+  }
   const guarded = join(root, 'cache', 'guarded')
   await writeCachedByClawSkill({
     sourceDir: source,

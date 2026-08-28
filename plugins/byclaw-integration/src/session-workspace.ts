@@ -10,6 +10,7 @@ import { resolve } from 'node:path'
 const BYCLAW_CONTEXT_PLUGIN = 'byclaw-context'
 const BYCLAW_CONTEXT_MARKER = '<!-- byclaw-context:session-workspace -->'
 const BYCLAW_SESSION_WORKSPACE_EVENT = 'byclaw/session-workspace'
+const BYCLAW_ROOT_BINDING_EVENT = 'byclaw/root-binding'
 
 /** Shared ByClaw runtime namespace inherited by one DSH Agent lineage. */
 export interface ByClawSessionWorkspace {
@@ -19,6 +20,11 @@ export interface ByClawSessionWorkspace {
   readonly cwd: string
 }
 
+/** Immutable identity of the Agent mounted at a ByClaw root session. */
+export type ByClawRootBinding =
+  | { readonly kind: 'main' }
+  | { readonly kind: 'template'; readonly templateId: string }
+
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
@@ -26,7 +32,70 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param data - external ByAI session id and absolute project cwd.
      */
     'byclaw/session-workspace': ByClawSessionWorkspace
+    /** Prevents a durable root from being rebound to another Agent identity. */
+    'byclaw/root-binding': ByClawRootBinding
   }
+}
+
+/** Return the immutable Agent identity recorded for a ByClaw root. */
+export function foldByClawRootBinding(events: readonly SessionEvent[]): ByClawRootBinding | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type === BYCLAW_ROOT_BINDING_EVENT) return event.data
+  }
+  return undefined
+}
+
+/** True only for pre-binding ByClaw roots that already carry the durable external workspace marker. */
+export function isLegacyByClawRootBindingCandidate(events: readonly SessionEvent[]): boolean {
+  return foldByClawRootBinding(events) === undefined && foldByClawSessionWorkspace(events) !== undefined
+}
+
+function rootBindingLabel(binding: ByClawRootBinding): string {
+  return binding.kind === 'main' ? 'main' : binding.templateId
+}
+
+/** Validate a previously persisted binding without mutating its event log. */
+export function assertByClawRootBinding(
+  events: readonly SessionEvent[],
+  requested: ByClawRootBinding,
+  sessionId = '<unknown>',
+): ByClawRootBinding {
+  const current = foldByClawRootBinding(events)
+  if (current === undefined) throw new Error(`ByClaw session ${sessionId} has no durable root binding`)
+  if (current.kind !== requested.kind
+    || (current.kind === 'template' && requested.kind === 'template' && current.templateId !== requested.templateId)) {
+    throw new Error(`ByClaw session ${sessionId} is already bound to template "${rootBindingLabel(current)}"`)
+  }
+  return current
+}
+
+/** Append a new binding or reject every live/resumed identity transition. */
+export function ensureByClawRootBinding(
+  session: Pick<Session, 'events' | 'append'>,
+  requested: ByClawRootBinding,
+  options: { requireExisting?: boolean; allowLegacyMigration?: boolean; sessionId?: string } = {},
+): ByClawRootBinding {
+  const current = foldByClawRootBinding(session.events)
+  if (current === undefined) {
+    // Released pre-binding ByClaw roots were main-Agent roots. A template identity cannot be
+    // reconstructed from their event log, so only that historically provable binding migrates.
+    if (options.allowLegacyMigration === true
+      && requested.kind === 'main'
+      && isLegacyByClawRootBindingCandidate(session.events)) {
+      session.append(BYCLAW_ROOT_BINDING_EVENT, requested)
+      return requested
+    }
+    if (options.allowLegacyMigration === true && isLegacyByClawRootBindingCandidate(session.events)) {
+      throw new Error(`ByClaw legacy session ${options.sessionId ?? '<unknown>'} cannot safely infer a template binding; start a new ByClaw session`)
+    }
+    if (options.requireExisting === true) {
+      return assertByClawRootBinding(session.events, requested, options.sessionId)
+    }
+    session.append(BYCLAW_ROOT_BINDING_EVENT, requested)
+    return requested
+  }
+  return assertByClawRootBinding(session.events, requested, options.sessionId)
 }
 
 /** Return the latest durable ByClaw session workspace from a session lineage. */
@@ -43,6 +112,7 @@ export function foldByClawSessionWorkspace(
 /** Register the plugin-owned workspace event before persistence can load it. */
 export function registerByClawSessionEventType(): void {
   ;(KNOWN_SESSION_EVENT_TYPES as Set<string>).add(BYCLAW_SESSION_WORKSPACE_EVENT)
+  ;(KNOWN_SESSION_EVENT_TYPES as Set<string>).add(BYCLAW_ROOT_BINDING_EVENT)
 }
 
 /** Append the root workspace once and reject any later namespace mutation. */

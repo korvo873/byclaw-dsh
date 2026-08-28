@@ -27,16 +27,16 @@ dsh --profile web --dump-config
 - 数字员工：`byclaw-employee-<resourceId>`，调用时实例化一个普通 DSH 子 Agent，不创建团队。
 - 专家团：`byclaw-group-<resourceId>`，调用时先实例化专家团自己的团长 Agent；团长再通过 `byclaw-team-<resourceId>` 创建本次任务的 AgentTeams 运行团队。
 
-主 Agent 只负责发现资源和选择模板，不代替专家团团长。临时团队完成任务并汇总后由团长调用 `agent_teams_delete` 解散；DSH 根会话、团长会话和团员会话继续持久化，因此 ByClaw FE 仍可查看完整父子会话。
+未指定目标时，主 Agent 负责发现资源和选择模板，但不代替专家团团长。直达时，所选数字员工或专家团团长直接组合到入站 DSH 根 Agent 上。临时团队完成任务并汇总后由团长调用 `agent_teams_delete` 解散；根会话和团员会话继续持久化，因此 ByClaw FE 仍可查看完整会话层级。
 
 ```text
 ByClaw 入站
   -> BYCLAW_DSH Worker
   -> 默认：DSH 主 Agent -> 模板
-  -> 指定 agent_id/code/name 或 @资源：对应模板实例 ->（专家团）团长 Agent -> AgentTeams 团员 Agent
+  -> 指定 agent_id/code/name 或 @资源：对应模板作为 DSH 根 Agent ->（专家团）AgentTeams 团员 Agent
 ```
 
-入站消息指定结构化 `agent_id`、`agent_code` 或 `agent_name` 时，插件先解析授权目录并直接创建／继续对应模板实例，不把这条业务指令交给主 Agent 再做一次路由。没有结构化字段时，正文中的唯一且无歧义的 `@资源名称` 或 `@资源编码` 也可选择目标，并会在投递前移除匹配文本。主 Agent 只作为 DSH 父会话和生命周期归属，不执行该条直达指令。目标不存在、未授权、字段冲突或正文歧义时，会在创建子会话前失败；未指定目标时仍使用主 Agent 的原有路由。主 Agent 派发后通过 DSH 的子 Agent 结算事件暂停和唤醒；专家团团长通过 AgentTeams 成员事件暂停和唤醒。两条链路都不轮询。
+入站消息指定结构化 `agent_id`、`agent_code` 或 `agent_name` 时，插件先解析授权目录，并把对应模板直接组合到入站根 Agent 上。因此业务指令不经过主 Agent 的路由／模型回合，也没有模板子 Agent 的结算中转。没有结构化字段时，正文中的唯一且无歧义的 `@资源名称` 或 `@资源编码` 也可选择目标，并会在投递前移除匹配文本。目标不存在、未授权、字段冲突或正文歧义时，会在执行前失败；未指定目标时仍使用主 Agent 的原有路由。直达根会话在生命周期内绑定到所选模板。专家团团员仍作为 AgentTeams 子 Agent 运行，其事件异步唤醒团长，不进行轮询。
 
 ## 动态资源与 Skill
 
@@ -77,10 +77,10 @@ info 日志会记录监听频道、keyspace／poll 模式、授权信号、资�
 
 ## ByClaw 消息映射
 
-- 入站支持 `extra_payload.agent_id`、`agent_code`、`agent_name`（兼容 camelCase 写法），按当前用户授权目录匹配数字员工或专家团；数字员工只允许当前用户直接授权的员工，专家团匹配当前用户授权的专家团。没有结构化字段时，正文中的唯一 `@资源名称`／`@资源编码`（忽略大小写）可选择目标，纯数字 `@` 不作为名称别名，匹配文本会从任务中移除。目标不存在、未授权、字段冲突或多个正文目标会在创建子会话前拒绝。未指定目标仍走主 Agent。
-- ByClaw 对外的 DSH 根会话 ID 与入站 `session_id` 完全一致，续聊和跨系统追踪使用同一个标识。直达实例内部子会话 ID 仍由 `userCode + 外部 session_id + template_id` 稳定生成，同一个会话再次指定同一 ID 会继续原对象上下文并保留内部父子关系。日志中的 `🎯 入站直达` 和 `scope=direct` 可用于确认没有经过主 Agent 的 LLM 回合。
-- ByAI 入站可通过 `extra_payload.cwd` 指定新建 DSH 根会话的绝对工作目录；未提供时使用插件 `workspace`。插件把外部 `session_id` 与解析后的目录一次性记录为 `byclaw/session-workspace`，并在恢复时拒绝冲突目录。业务指令保持为未经改写的 `source: user` 消息。每个 Agent 的第一次获准步骤会另行收到 `plugin:byclaw-context` 消息，其中只声明继承的会话工作区；插件通过持久消息检查避免恢复后重复注入，子 Agent 则忽略父会话种子中的标记并记录自己的上下文。每个可继续子 Agent 都会在尚未发布的创建窗口从在线父会话复制该持久命名空间并保留自己独立的 DSH 会话 ID；用户消息不再重复包装 workspace。
-- 每条 `AskAgent` 入站会按顺序输出终端可见的生命周期日志：收到命令及其标识；继承的 ByClaw 会话命名空间、DSH ID、实际 `cwd` 和根／委派作用域；新建、恢复或继续会话；不含密钥的模型解析信息（`sourceModelId`、provider、model、protocol 和解析来源）；携带完整指令的任务启动。数字员工或专家团子 Agent 完成组合时，另输出一条日志，只列出该模板自己的 Skill 名称和本地路径。插件不会额外写入登录授权、Redis 密码、模型端点或模型密钥；由于完整指令可能包含敏感内容，运维方必须把这些日志作为对话数据管理。
+- 入站支持 `extra_payload.agent_id`、`agent_code`、`agent_name`（兼容 camelCase 写法），按当前用户授权目录匹配数字员工或专家团；数字员工只允许当前用户直接授权的员工，专家团匹配当前用户授权的专家团。没有结构化字段时，正文中的唯一 `@资源名称`／`@资源编码`（忽略大小写）可选择目标，纯数字 `@` 不作为名称别名，匹配文本会从任务中移除。目标不存在、未授权、字段冲突或多个正文目标会在执行前拒绝。未指定目标仍走主 Agent。
+- ByClaw 对外的 DSH 根会话 ID 与入站 `session_id` 完全一致，续聊和跨系统追踪使用同一个标识。直达时，这个根 Agent 本身就是所选模板实例；同一会话再次指定同一目标会继续原上下文，尝试把在线会话改绑到其他模板则会被拒绝。日志中的 `🎯 入站直达` 和 `scope=direct-root` 可用于确认没有经过主 Agent 的 LLM 回合。
+- ByAI 入站可通过 `extra_payload.cwd` 指定新建 DSH 根会话的绝对工作目录；未提供时使用插件 `workspace`。插件把外部 `session_id` 与解析后的目录一次性记录为 `byclaw/session-workspace`，并在恢复时拒绝冲突目录。业务指令保持为未经改写的 `source: user` 消息。每个 Agent 的第一次获准步骤会另行收到 `plugin:byclaw-context` 消息，其中只声明继承的会话工作区；插件通过持久消息检查避免恢复后重复注入。AgentTeams 团员继承该命名空间，但保留各自独立的 DSH 会话 ID；用户消息不再重复包装 workspace。
+- 每条 `AskAgent` 入站会按顺序输出终端可见的生命周期日志：收到命令及其标识；继承的 ByClaw 会话命名空间、DSH ID、实际 `cwd` 和根／委派作用域；新建、恢复或继续会话；不含密钥的模型解析信息（`sourceModelId`、provider、model、protocol 和解析来源）；携带完整指令的任务启动。数字员工根 Agent、专家团根 Agent 或普通委派模板子 Agent 完成组合时，另输出一条日志，只列出该模板自己的 Skill 名称和本地路径。插件不会额外写入登录授权、Redis 密码、模型端点或模型密钥；由于完整指令可能包含敏感内容，运维方必须把这些日志作为对话数据管理。
 - DSH 文本块 -> `answerDelta`
 - DSH reasoning 块 -> `reasoningLogDelta`
 - `ask_user_question` -> `contentType=3014` 的结构化 ByClaw 提问卡片；`ResumeCommand` 回填并唤醒原调用
@@ -102,7 +102,11 @@ info 日志会记录监听频道、keyspace／poll 模式、授权信号、资�
 
 Redis 连接只读取标准 `REDIS_*` 环境变量。默认 ByClaw BE 地址为 `http://123.56.153.229:8080`，可通过 `baseUrl` 覆盖。Redis 模型模式还需提供用于解密 ByClaw 模型鉴权的 `BAIYING_AIMODEL_AUTH_TOKEN_SM4_KEY_HEX`。如需运行态只使用本地 DSH 模型路由，请设置 `BYCLAW_REDIS_MODEL_ENABLED=false`，并同时配置 `provider` 和 `model`。DSH 启动器会读取启动工作目录下的 `.env`；已导出的进程环境变量优先于该文件和 `$DSH_HOME/.env`。
 
-专家团链路包含“主 Agent -> 团长 -> 团员”两级委派，因此 AgentTeams 配置必须允许深度 2：
+可在运行时设置可选变量 `BYCLAW_DSH_WEB_AUTH_TOKEN`，让 DSH Web 在容器重启后使用同一个启动 token。适配器只把根路径的 `?token=` 交换翻译为 DSH 内部随机 token；签名 cookie、Host/Origin 信任校验以及所有 API/WebSocket 鉴权仍由 DSH 原实现负责。镜像不内置默认值；显式空值会让插件启动失败。请通过容器环境或未跟踪的 `.env` 注入。
+
+如需进行隔离的真实链路冒烟测试，可通过 `E2E_TARGET_AGENT_TYPE` 只覆盖测试脚本投递的 Worker 类型。业务路由接口仍然只使用 `--agent-id`，同时可避免测试消息被默认类型下的其他在线 Worker 消费。
+
+未指定目标时，专家团链路可能包含“主 Agent -> 团长 -> 团员”两级委派；直达专家团则是“团长根 Agent -> 团员”一级委派。因此 AgentTeams 配置仍需允许深度 2：
 
 ```yaml
 - id: agent-teams

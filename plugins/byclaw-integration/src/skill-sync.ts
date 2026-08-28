@@ -10,6 +10,9 @@ import { pipeline } from 'node:stream/promises'
 import { promisify } from 'node:util'
 import type { ByClawSkillRef } from './types.ts'
 
+/** Cold-start Skill downloads can legitimately approach the old 30s ceiling. */
+export const DEFAULT_BYCLAW_SKILL_SYNC_TIMEOUT_MS = 60_000
+
 const execFileAsync = promisify(execFile)
 const METADATA_FILE = '.byclaw-hub-skill.json'
 
@@ -187,13 +190,18 @@ export async function syncByClawSkill(options: {
   timeoutMs?: number
 }): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch
-  const timeoutMs = options.timeoutMs ?? 30_000
+  const timeoutMs = options.timeoutMs ?? DEFAULT_BYCLAW_SKILL_SYNC_TIMEOUT_MS
   const versionUrl = byClawSkillUrl(options.baseUrl, options.ref.versionUrl)
-  const version = await responseVersion(await fetchImpl(versionUrl, {
-    headers: options.headers,
-    redirect: 'manual',
-    signal: AbortSignal.timeout(timeoutMs),
-  }))
+  let version: { version: string; downloadUrl?: string }
+  try {
+    version = await responseVersion(await fetchImpl(versionUrl, {
+      headers: options.headers,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    }))
+  } catch (error: unknown) {
+    throw new Error(`ByClaw Skill ${options.ref.code} version request failed: ${String(error)}`, { cause: error })
+  }
   const downloadUrl = byClawSkillUrl(options.baseUrl, version.downloadUrl ?? options.ref.downloadUrl)
   const targetDir = byClawSkillCacheDir(options.cacheRoot, options.ref.code)
   const cached = await readCachedByClawSkill(targetDir)
@@ -204,13 +212,17 @@ export async function syncByClawSkill(options: {
     const zipPath = join(scratch, 'skill.zip')
     const extractDir = join(scratch, 'extract')
     await mkdir(extractDir, { recursive: true })
-    const response = await fetchImpl(downloadUrl, {
-      headers: options.headers,
-      redirect: 'manual',
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    if (!response.ok || response.body === null) throw new Error(`ByClaw Skill download failed with HTTP ${response.status}`)
-    await pipeline(Readable.fromWeb(response.body as never), createWriteStream(zipPath))
+    try {
+      const response = await fetchImpl(downloadUrl, {
+        headers: options.headers,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      if (!response.ok || response.body === null) throw new Error(`HTTP ${response.status}`)
+      await pipeline(Readable.fromWeb(response.body as never), createWriteStream(zipPath))
+    } catch (error: unknown) {
+      throw new Error(`ByClaw Skill ${options.ref.code} download failed: ${String(error)}`, { cause: error })
+    }
     const entries = await validateZip(zipPath)
     await extractZip(zipPath, extractDir, entries)
     let sourceDir = extractDir

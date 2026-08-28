@@ -11,6 +11,7 @@
  */
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { SUBAGENT_DESCRIPTOR_VERSION } from '@deepseek-ai/dsh-subagent'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative } from 'node:path'
 import {
@@ -251,11 +252,13 @@ function disposableRegistry() {
         return () => promptSections.delete(section.name)
       },
     },
-    conversationEvents: {
-      register(definition) {
-        if (conversations.has(definition.kind)) throw new Error(`duplicate conversation ${definition.kind}`)
-        conversations.set(definition.kind, definition)
-        return () => conversations.delete(definition.kind)
+    uiConversation: {
+      events: {
+        register(definition) {
+          if (conversations.has(definition.kind)) throw new Error(`duplicate conversation ${definition.kind}`)
+          conversations.set(definition.kind, definition)
+          return () => conversations.delete(definition.kind)
+        },
       },
     },
   }
@@ -647,7 +650,7 @@ function descriptorEvent(label, agentProvider = 'descriptor-provider', agentMode
   return {
     type: 'subagent/descriptor',
     data: {
-      version: 2,
+      version: SUBAGENT_DESCRIPTOR_VERSION,
       mode: 'continuable',
       provider: 'spawn',
       label,
@@ -661,10 +664,12 @@ function fakeChildContext({ label, parentSessionId, cwd, agentProvider, agentMod
   const listeners = new Map()
   const skills = new Map()
   const tools = new Map()
+  const promptVariables = new Map()
   return {
     listeners,
     skills,
     tools,
+    promptVariables,
     context: {
       agent: {
         session: {
@@ -695,6 +700,10 @@ function fakeChildContext({ label, parentSessionId, cwd, agentProvider, agentMod
       },
       systemPrompt: {
         section() { return () => undefined },
+        variable(name, provider) {
+          promptVariables.set(name, provider)
+          return () => promptVariables.delete(name)
+        },
       },
     },
   }
@@ -763,6 +772,10 @@ await selectionRuntime.withPending(
 check(
   'ByClaw Skill is registered only in the selected member scope',
   freshChild.skills.has('architecture-rules'),
+)
+check(
+  'ByClaw frontend file-preview placeholder survives strict DSH prompt assembly',
+  freshChild.promptVariables.get('file_preview_prefix')?.() === '{{file_preview_prefix}}',
 )
 check(
   'ByClaw member keeps the standard scoped Skill loader visible',

@@ -1,7 +1,61 @@
+import assert from 'node:assert/strict'
 import {
+  assertByClawLiveE2eTopology,
   buildByClawInboundExtraPayload,
   parseByClawLiveE2eArgs,
 } from '../src/live-e2e-options.ts'
+
+assertByClawLiveE2eTopology('direct-employee', {
+  sessionId: 'root', answer: '我是梁远图', teamCards: [],
+  sessionCards: [{ sessionId: 'root', parentSessionId: 'root', depth: 0 }],
+})
+assertByClawLiveE2eTopology('expert-team', {
+  sessionId: 'team-root', answer: '蛋蛋、艾丽、懒懒分别做了自我介绍',
+  sessionCards: [
+    { sessionId: 'team-root', parentSessionId: 'team-root', depth: 0 },
+    { sessionId: 'member-1', parentSessionId: 'team-root', depth: 1 },
+    { sessionId: 'member-1', parentSessionId: 'team-root', depth: 1, eventKind: 'session.output', text: '我是蛋蛋' },
+    { sessionId: 'member-2', parentSessionId: 'team-root', depth: 1 },
+    { sessionId: 'member-2', parentSessionId: 'team-root', depth: 1, eventKind: 'session.output', text: '我是艾丽' },
+    { sessionId: 'member-3', parentSessionId: 'team-root', depth: 1 },
+    { sessionId: 'member-3', parentSessionId: 'team-root', depth: 1, eventKind: 'session.output', text: '我是懒懒' },
+  ],
+  teamCards: [{ team: { captainSessionId: 'team-root', members: [
+    { id: 'member-1', name: '公众号运营助手-蛋蛋' },
+    { id: 'member-2', name: '文章创作助手-艾丽' },
+    { id: 'member-3', name: '社交媒体配图专家-懒懒' },
+  ] } }],
+}, ['蛋蛋', '艾丽', '懒懒'])
+assert.throws(
+  () => assertByClawLiveE2eTopology('expert-team', {
+    sessionId: 'team-root', answer: '', sessionCards: [{ sessionId: 'team-root', depth: 0 }], teamCards: [],
+  }),
+  /requires E2E_EXPECT_TEAM_MEMBERS/u,
+)
+assert.throws(
+  () => assertByClawLiveE2eTopology('expert-team', {
+    sessionId: 'team-root', answer: '蛋蛋',
+    sessionCards: [
+      { sessionId: 'team-root', depth: 0 },
+      { sessionId: 'member-1', parentSessionId: 'team-root', depth: 1, eventKind: 'session.output', text: '我是蛋蛋' },
+      { sessionId: 'member-2', parentSessionId: 'team-root', depth: 1, eventKind: 'session.output', text: '我是艾丽' },
+    ],
+    teamCards: [{ team: { captainSessionId: 'team-root', members: [
+      { id: 'member-1', name: '公众号运营助手-蛋蛋' },
+      { id: 'member-2', name: '文章创作助手-艾丽' },
+    ] } }],
+  }, ['蛋蛋']),
+  /complete roster/u,
+)
+try {
+  assertByClawLiveE2eTopology('direct-employee', {
+    sessionId: 'root', answer: '', teamCards: [],
+    sessionCards: [{ sessionId: 'root', depth: 0 }, { sessionId: 'middleman', parentSessionId: 'root', depth: 1 }],
+  })
+  throw new Error('direct employee intermediary was not rejected')
+} catch (error) {
+  if (!String(error).includes('intermediary')) throw error
+}
 
 const parsed = parseByClawLiveE2eArgs([
   '--agent-id', '101',
@@ -23,6 +77,15 @@ if (!main.main || main.targetAgentType !== 'BYCLAW_DSH' || Object.keys(buildByCl
 const structured = parseByClawLiveE2eArgs(['--agent-id', '123', '做自我介绍'])
 if (JSON.stringify(buildByClawInboundExtraPayload('', structured)) !== JSON.stringify({ agent_id: '123' })) {
   throw new Error('structured target payload mismatch')
+}
+
+const isolated = parseByClawLiveE2eArgs(
+  ['--agent-id', '123', '做自我介绍'],
+  'adminvip',
+  'BYCLAW_DSH_COMPAT_E2E',
+)
+if (isolated.targetAgentType !== 'BYCLAW_DSH_COMPAT_E2E') {
+  throw new Error(`explicit E2E target AgentType mismatch: ${isolated.targetAgentType}`)
 }
 
 const coded = parseByClawLiveE2eArgs(['--agent-code', 'ARCHITECT', '--agent-name', '架构舵手', '分析架构'])

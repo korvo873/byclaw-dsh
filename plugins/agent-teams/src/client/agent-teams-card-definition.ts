@@ -12,12 +12,13 @@
  */
 
 import type {
-  ChatConversationViewNode, ConversationNodeContext,
-  ConversationNodeDefinition,
-} from '@deepseek-ai/dsh-client-runtime/client'
+  ConversationNodeContext, ConversationNodeDefinition,
+} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ChatConversationViewNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 // Module-loading imports: the declaration merges below extend modules that
 // must be present in the program — a type-only import both loads them and is
 // erased from the bundle.
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-session/types'
 
@@ -34,7 +35,7 @@ export interface AgentTeamsCardData {
   }[]
 }
 
-declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
+declare module '@deepseek-ai/dsh-client-ui-chat/client' {
   interface ChatNodeDataMap {
     /** Lightweight team summary card anchoring the conversation. */
     'agent-teams': AgentTeamsCardData

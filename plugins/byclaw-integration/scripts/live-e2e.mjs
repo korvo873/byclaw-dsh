@@ -8,6 +8,7 @@ import {
   createRedis,
 } from '@byclaw/by-framework'
 import {
+  assertByClawLiveE2eTopology,
   buildByClawInboundExtraPayload,
   parseByClawLiveE2eArgs,
 } from '../lib/live-e2e-options.js'
@@ -19,8 +20,20 @@ const cwd = process.env.E2E_CWD?.trim()
 const targetAgentType = options.targetAgentType
 const userCode = process.env.USER_CODE || 'adminvip'
 const timeoutMs = Number(process.env.E2E_TIMEOUT_MS || 10 * 60 * 1000)
+const expectedTopology = process.env.E2E_EXPECT_TOPOLOGY?.trim()
+const expectedMembers = (process.env.E2E_EXPECT_TEAM_MEMBERS || '')
+  .split(',').map(value => value.trim()).filter(Boolean)
 const redis = createRedis()
 const extraPayload = buildByClawInboundExtraPayload(cwd, options)
+
+if ((options.agentId !== undefined || options.agentCode !== undefined || options.agentName !== undefined)
+  && expectedTopology !== 'direct-employee'
+  && expectedTopology !== 'expert-team') {
+  throw new Error('direct-target live E2E requires E2E_EXPECT_TOPOLOGY=direct-employee|expert-team')
+}
+if (expectedTopology === 'expert-team' && expectedMembers.length === 0) {
+  throw new Error('expert-team live E2E requires E2E_EXPECT_TEAM_MEMBERS')
+}
 
 function snowflakeSessionId() {
   const epoch = 1704067200000n
@@ -47,7 +60,11 @@ try {
     })
     if (!response.success) throw new Error(response.error || response.status)
     console.log(JSON.stringify({ prompt, traceId: response.trace_id }))
-    await streamUntilTerminal(response.trace_id)
+    const observation = await streamUntilTerminal(response.trace_id)
+    if (expectedTopology === 'direct-employee' || expectedTopology === 'expert-team') {
+      assertByClawLiveE2eTopology(expectedTopology, observation, expectedMembers)
+      console.log(JSON.stringify({ topologyVerified: expectedTopology, expectedMembers }))
+    }
   }
 } finally {
   await redis.quit()
@@ -59,6 +76,8 @@ async function streamUntilTerminal(traceId) {
   let cursor = '0-0'
   let answer = ''
   let reasoning = ''
+  const sessionCards = []
+  const teamCards = []
   while (Date.now() < deadline) {
     const rows = await redis.xread('COUNT', 100, 'BLOCK', Math.min(5000, deadline - Date.now()), 'STREAMS', stream, cursor)
     for (const entry of parseStreamRows(rows)) {
@@ -69,14 +88,29 @@ async function streamUntilTerminal(traceId) {
       const text = deltaText(event.data)
       if (text && eventType === 'answerDelta') answer += text
       if (text && eventType === 'reasoningLogDelta') reasoning += text
+      if (text && eventType === 'reasoningLogDelta') {
+        const card = parseJsonObject(text)
+        const contentType = String(event.data?.content_type ?? '')
+        if (card !== undefined && contentType === '3015') sessionCards.push(card)
+        if (card !== undefined && contentType === '3016') teamCards.push(card)
+      }
       if (eventType === 'error') throw new Error(String(event.metadata?.error || event.state_msg || 'worker error'))
       if (eventType === 'appStreamResponse') {
         console.log(JSON.stringify({ eventType, answer, reasoning, metadata: event.metadata }))
-        return
+        return { sessionId, answer, sessionCards, teamCards }
       }
     }
   }
   throw new Error(`timed out waiting for trace ${traceId}`)
+}
+
+function parseJsonObject(text) {
+  try {
+    const value = JSON.parse(text)
+    return typeof value === 'object' && value !== null ? value : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function parseStreamRows(rows) {

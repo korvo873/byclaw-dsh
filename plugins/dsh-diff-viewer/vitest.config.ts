@@ -34,8 +34,6 @@ export default defineConfig({
       // The src/ prefix must precede the bare package name (string finds
       // prefix-match) so tests can import fork internals like clipboard.ts.
       { find: '@deepseek-ai/dsh-client-ui-primitives/src/', replacement: `${fork}/ui-primitives/src/` },
-      { find: '@deepseek-ai/dsh-client-runtime/client', replacement: `${fork}/runtime/src/client/index.ts` },
-      { find: '@deepseek-ai/dsh-client-runtime', replacement: `${fork}/runtime/src/index.ts` },
       { find: '@deepseek-ai/dsh-client-ui-slots', replacement: `${fork}/ui-slots/src/index.ts` },
       { find: '@deepseek-ai/dsh-client-ui-primitives', replacement: `${fork}/ui-primitives/src/index.ts` },
       { find: '@deepseek-ai/dsh-client-ui-tool/client', replacement: `${fork}/ui-tool/src/client/index.ts` },

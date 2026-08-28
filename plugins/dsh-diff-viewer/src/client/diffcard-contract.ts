@@ -1,43 +1,13 @@
-/** Local toolview contract for the diff-viewer plugin: the owner currency the
- *  stock ui-tool rows supply at `tool.call.toolview` and the pure diff-card
- *  derivation, declared locally so this plugin never imports the stock ui-tool
- *  contract (one-way dependency). The `declare module` merge restores the slot
- *  key this plugin registers into — the stock ui-tool bundle declares the same
- *  row with the same shape, and interface merging accepts the duplicate
- *  identical declaration. */
-import type { ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
+/** Pure diff-card derivation for the stock ui-tool owner currency. */
+import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { DiffHunk } from './DiffViewer.tsx'
-
-/** What the stock ui-tool rows pass to the `tool.call.toolview` keyed slots. */
-export interface ToolCallOwnerProps {
-  /** Tool call identity, stable across running and settled forms. */
-  callId: string
-  /** Wire Tool name and keyed dispatch value. */
-  toolName: string
-  /** Frozen running call or settled result node. */
-  block: ToolCallBlock
-  /** Session workspace root for relative summaries. */
-  cwd?: string | undefined
-  /** Open a Tool argument path through the Host. */
-  openFile: (path: string) => void
-  /** Inspect this call in the trajectory view when available. */
-  inspect?: (() => void) | undefined
-}
 
 /** The derived diff-card material the renderer draws. */
 export interface DiffCardModel {
   card: { diffs: DiffHunk[] }
 }
 
-declare module '@deepseek-ai/dsh-client-ui-slots' {
-  interface SlotMap {
-    /** Keyed atomic Tool call view (declared by the stock ui-tool chat tree). */
-    'tool.call.toolview': { kind: 'keyed'; scope: 'session'; owner: ToolCallOwnerProps }
-  }
-}
-
-/** Narrow a wire `card:'diff'` view's `diffs` to well-formed hunks (same
- *  validation the stock diff-card model applies). */
+/** Narrow result metadata's `diffs` to well-formed hunks. */
 function narrowDiffs(diffs: unknown): DiffHunk[] | null {
   if (!Array.isArray(diffs) || diffs.length === 0) return null
   for (const hunk of diffs) {
@@ -107,24 +77,20 @@ function callToolName(block: ToolCallBlock): string {
 export function diffCardModel(block: ToolCallBlock): DiffCardModel | null {
   const toolName = callToolName(block)
   if (!('kind' in block)) {
-    // Running: the call view may carry the intended diff; the result is absent.
-    const call = block.callView?.card === 'diff' ? block.callView : null
-    const diffs = call === null ? null : narrowDiffs(call.diffs)
-    if (diffs !== null) return { card: { diffs } }
-    // A code-dispatch sub-call has no call view at all; its args still carry
-    // the intended change, so the call-time fallback keeps the row a diff card.
+    // Running presentation is now derived from the durable raw call.
     const fallback = callTimeDiffs(toolName, block.argsRaw)
     return fallback === null ? null : { card: { diffs: fallback } }
   }
-  // Settled: the result view's applied hunks replace the call-time diff.
-  const result = block.resultView?.card === 'diff' ? block.resultView : null
-  const diffs = result === null ? null : narrowDiffs(result.diffs)
-  if (diffs !== null) return { card: { diffs } }
-  // A settled code-dispatch sub-call never carries a result view (the dispatch
-  // bridge logs no presentation metadata). Successful mutations fall back to
-  // the call-time diff from args; errored ones stay on the generic error path,
-  // exactly like the stock row (which surfaces the model-facing error text).
   if (block.isError) return null
+  // Applied hunks moved from resultView to the durable result metadata in
+  // Harness 0.1.2; they take precedence over the intended call-time diff.
+  const meta = typeof block.meta === 'object' && block.meta !== null && !Array.isArray(block.meta)
+    ? block.meta as Record<string, unknown>
+    : undefined
+  const diffs = meta === undefined ? null : narrowDiffs(meta['diffs'])
+  if (diffs !== null) return { card: { diffs } }
+  // Code-dispatch children carry no presentation metadata, so preserve their
+  // replay-safe argument-derived diff.
   const fallback = callTimeDiffs(toolName, block.call?.argsRaw ?? '')
   return fallback === null ? null : { card: { diffs: fallback } }
 }

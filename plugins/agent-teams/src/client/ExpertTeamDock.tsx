@@ -1,7 +1,7 @@
 /** WorkBuddy-shaped expert group strip backed by Harness-native child sessions. */
 
 import { useEffect, useState } from 'react'
-import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ActivityTeam } from './ActivityPanel.tsx'
 import { LEAD_ART, memberArtUrl } from './artwork.ts'

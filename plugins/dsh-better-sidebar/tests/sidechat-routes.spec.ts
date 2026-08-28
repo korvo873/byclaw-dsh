@@ -132,7 +132,7 @@ describe('sidechat.start', () => {
       'subagent/descriptor',
     ])
     expect(options.seed.at(-1)?.data).toMatchObject({
-      version: 2,
+      version: 3,
       mode: 'continuable',
       provider: 'sidechat',
       label: sideLabel('explain the event flow'),

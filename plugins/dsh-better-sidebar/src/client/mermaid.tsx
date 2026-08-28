@@ -399,7 +399,7 @@ export function MermaidMarkdown({ text, codeLabels }: MermaidMarkdownProps): Rea
 
   return (
     <div className={css.mermaidMarkdown} ref={containerRef}>
-      <MarkdownText text={text} codeLabels={codeLabels} />
+      <MarkdownText text={text} labels={{ code: codeLabels, footnotes: 'Footnotes' }} />
     </div>
   )
 }

@@ -2,7 +2,7 @@
  * tsdown preset for dsh-diff-viewer: an ESM node half with declarations plus
  * a browser half (lib/client.js) wrapped for the harness client-plugin loader.
  * The browser half keeps the loader's platform module table external
- * (react, cordis, ui-slots, primitives, runtime) and inlines everything else
+ * (React, Cordis, client store, slots, and primitives) and inlines everything else
  * (including the `diff` line/word diff engine); CSS Modules compile through
  * lightningcss into a <style data-plugin> tag injected at factory execution
  * (removed on unload), the same mechanism as the official client bundles.
@@ -18,15 +18,14 @@ const PLUGIN_ID = '@byclaw/dsh-diff-viewer'
 
 /** Module specifiers the dsh web shell shares into its frozen module table. */
 const PLATFORM_MODULES = [
-  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', 'cordis',
+  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-web-react',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-schema-form',
 ] as const
 
 /** Externals resolved from the loader module table. */
-const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES, '@deepseek-ai/dsh-client-runtime/client']
+const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES]
 
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
