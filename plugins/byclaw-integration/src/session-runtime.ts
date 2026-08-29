@@ -695,6 +695,20 @@ export class ByClawAsyncTeamGate {
   }
 }
 
+/** Wait for the captain's final wake-up turn after an async team/template gate opens. */
+export async function waitForAsyncTurnCompletion(
+  agent: Pick<Agent, 'whenIdle'>,
+  teamGate: Pick<ByClawAsyncTeamGate, 'waiting' | 'completion' | 'assertHealthy'>,
+): Promise<void> {
+  if (teamGate.waiting) {
+    await teamGate.completion
+    // Team cleanup resolves the gate from the delete tool result, before the
+    // captain has finished streaming the final answer and appended turn/end.
+    await agent.whenIdle()
+  }
+  teamGate.assertHealthy()
+}
+
 const TERMINAL_TEAM_TASK_STATES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'stopped', 'error'])
 
 export function isQuiescentTeamSnapshot(snapshot: Pick<TeamActivitySnapshot, 'tasks'>): boolean {
@@ -848,8 +862,7 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
       this.messageAgents.set(command.header.messageId, agent)
       await agent.whenIdle()
       await turn.forwarding
-      if (turn.teamGate.waiting) await turn.teamGate.completion
-      turn.teamGate.assertHealthy()
+      await waitForAsyncTurnCompletion(agent, turn.teamGate)
       await turn.forwarding
       const failure = turnFailureMessage(agent.session.events)
       if (failure !== undefined) throw new Error(`DSH turn failed: ${failure}`)
