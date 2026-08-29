@@ -1,8 +1,10 @@
 /** Native ByClaw FE projection checks without Redis or a running DSH instance. */
 
 import assert from 'node:assert/strict'
+import { EventType } from '@byclaw/by-framework'
 import {
   childOutputProjection,
+  detailProjection,
   reasoningProjection,
   sessionStatusProjection,
   teamSnapshotProjection,
@@ -32,15 +34,16 @@ assert.equal(reasoning.options.contentType, '1001')
 assert.equal(reasoning.options.messageId, 'dsh:child-session:event:17:think')
 assert.equal(reasoning.options.parentMessageId, 'dsh:child-session')
 assert.deepEqual(reasoning.options.metadata, {
-  dsh_event: 'think',
-  dsh_scope: 'child',
-  dsh_session_id: 'child-session',
-  parent_dsh_session_id: 'root-session',
-  root_dsh_session_id: 'root-session',
-  external_parent_session_id: 'byclaw-session',
+  event_source: 'dsh',
+  event_kind: 'think',
+  session_scope: 'child',
+  external_session_id: 'child-session',
+  external_parent_session_id: 'root-session',
+  external_root_session_id: 'root-session',
+  host_session_id: 'byclaw-session',
   delegation_depth: 1,
-  dsh_sequence: '17:think',
-  dsh_status: 'running',
+  event_sequence: '17:think',
+  session_status: 'running',
   child_name: '架构专家',
   child_task: '分析系统结构',
 })
@@ -53,7 +56,25 @@ const childOutput = childOutputProjection('我是架构专家。', {
 assert.equal(childOutput.options.eventType, 'answerDelta')
 assert.equal(childOutput.options.contentType, '1002')
 assert.equal(childOutput.options.parentMessageId, 'dsh:child-session')
-assert.equal(childOutput.options.metadata.dsh_scope, 'child')
+assert.equal(childOutput.options.metadata.session_scope, 'child')
+
+const contextDetail = detailProjection({
+  title: '上下文注入 · skill-catalog',
+}, {
+  ...childContext,
+  sequence: '18:context',
+  eventKind: 'context',
+})
+assert.equal(contextDetail.options.eventType, 'reasoningLogDelta')
+assert.equal(contextDetail.options.contentType, '3015')
+assert.equal(contextDetail.options.objectType, 'tool_call')
+assert.equal(contextDetail.options.status, '_DONE_')
+assert.deepEqual(JSON.parse(contextDetail.content), {
+  title: '上下文注入 · skill-catalog',
+  status: '_DONE_',
+  source: 'runtime',
+  eventKind: 'context',
+})
 
 const toolStart = toolCallProjection({
   phase: 'start',
@@ -164,6 +185,7 @@ const teamRunning = teamSnapshotProjection({
 const teamPayload = JSON.parse(teamRunning.content)
 assert.equal(teamRunning.options.contentType, '3015')
 assert.equal(teamRunning.options.objectType, 'tool_call')
+assert.equal(teamRunning.options.eventType, EventType.ANSWER_DELTA)
 assert.equal(teamRunning.options.messageId, 'root-message:team:team-1')
 assert.equal(teamRunning.options.parentMessageId, 'root-message')
 assert.equal(teamRunning.options.status, '_START_')
@@ -172,7 +194,7 @@ assert.equal(teamPayload.status, '_START_')
 assert.equal(teamPayload.eventKind, 'agent-teams/snapshot')
 assert.equal(teamPayload.schemaVersion, 2)
 assert.equal(teamPayload.team.teamId, 'team-1')
-assert.equal(teamRunning.options.metadata.dsh_scope, 'team')
+assert.equal(teamRunning.options.metadata.session_scope, 'team')
 
 const teamDone = teamSnapshotProjection(teamPayload.team, {
   archived: true,
@@ -236,17 +258,22 @@ await runtime.emitSessionEvent(
 assert.equal(emittedChunks.length, 2)
 const [, , statusContent, statusOptions] = emittedChunks[0]
 const [, , thinkContent, thinkOptions] = emittedChunks[1]
-assert.equal(statusContent, '子 Agent · 子 Agent 正在处理任务')
+assert.equal(statusContent.content, '子 Agent · 子 Agent 正在处理任务')
+assert.equal(statusContent.metadata.session_scope, 'child')
 assert.equal(statusOptions.contentType, '3009')
 assert.equal(statusOptions.messageId, 'dsh:child-session')
 assert.equal(statusOptions.parentMessageId, 'root-message')
-assert.equal(statusOptions.metadata.dsh_scope, 'child')
-assert.equal(statusOptions.metadata.root_dsh_session_id, 'root-session')
-assert.equal(statusOptions.metadata.external_parent_session_id, 'byclaw-session')
-assert.equal(statusOptions.metadata.dsh_status, 'running')
+assert.equal(statusOptions.metadata.session_scope, 'child')
+assert.equal(statusOptions.metadata.external_root_session_id, 'root-session')
+assert.equal(statusOptions.metadata.host_session_id, 'byclaw-session')
+assert.equal(statusOptions.metadata.session_status, 'running')
 assert.equal(statusOptions.metadata.child_name, '子 Agent')
-assert.equal(thinkContent, '分析依赖关系')
+assert.equal(thinkContent.content, '分析依赖关系')
+assert.equal(thinkContent.metadata.session_scope, 'child')
+assert.equal(thinkOptions.eventType, 'reasoningLogDelta')
 assert.equal(thinkOptions.contentType, '1001')
+assert.equal(thinkOptions.objectType, undefined)
+assert.equal(thinkOptions.status, undefined)
 assert.equal(thinkOptions.parentMessageId, 'dsh:child-session')
 await runtime.close()
 

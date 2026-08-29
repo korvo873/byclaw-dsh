@@ -46,6 +46,7 @@ export { BYCLAW_DSH_AGENT_TYPE, DEFAULT_BYCLAW_BE_BASE_URL }
 export * from './types.ts'
 export * from './session-workspace.ts'
 export * from './inbound-routing.ts'
+export * from './byclaw-presentation.ts'
 export {
   BYCLAW_REDIS_MODEL_ENABLED_ENV,
   ByClawDynamicModelRuntime,
@@ -56,6 +57,19 @@ export {
 } from './model-runtime.ts'
 export { BYCLAW_DSH_WEB_AUTH_TOKEN_ENV, overrideByClawWebAuthToken } from './web-auth.ts'
 export type { ByClawModelFallback, ByClawModelRuntimeOptions, ByClawModelSelection } from './model-runtime.ts'
+
+/** Environment override for the ByClaw backend origin. */
+export const BYCLAW_DSH_BASE_URL_ENV = 'BYCLAW_DSH_BASE_URL'
+
+/** Resolve the backend origin with process environment taking precedence over plugin config. */
+export function resolveByClawBaseUrl(
+  configured: string | undefined,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  return environment[BYCLAW_DSH_BASE_URL_ENV]?.trim()
+    || configured?.trim()
+    || DEFAULT_BYCLAW_BE_BASE_URL
+}
 
 export const name = 'byclaw-dsh'
 export const inject = ['agentPresets', 'agents', 'llm', 'sessionPersistence', 'subagents', 'tools', 'systemPrompt']
@@ -217,7 +231,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   registerByClawSessionEventType()
   const userCode = config.userCode?.trim() || process.env['USER_CODE']?.trim()
   if (userCode === undefined || userCode === '') throw new Error('byclaw-dsh requires config.userCode or USER_CODE')
-  const baseUrl = config.baseUrl?.trim() || DEFAULT_BYCLAW_BE_BASE_URL
+  const baseUrl = resolveByClawBaseUrl(config.baseUrl)
   const catalogDir = resolve(config.catalogDir?.trim() || defaultCatalogDir())
   const agentTemplateDir = resolve(config.agentTemplateDir?.trim() || defaultAgentTemplateDir())
   const skillCacheDir = resolve(config.skillCacheDir?.trim() || defaultByClawSkillCache(agentTemplateDir))

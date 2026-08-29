@@ -81,11 +81,13 @@ info 日志会记录监听频道、keyspace／poll 模式、授权信号、资�
 - ByClaw 对外的 DSH 根会话 ID 与入站 `session_id` 完全一致，续聊和跨系统追踪使用同一个标识。直达时，这个根 Agent 本身就是所选模板实例；同一会话再次指定同一目标会继续原上下文，尝试把在线会话改绑到其他模板则会被拒绝。日志中的 `🎯 入站直达` 和 `scope=direct-root` 可用于确认没有经过主 Agent 的 LLM 回合。
 - ByAI 入站可通过 `extra_payload.cwd` 指定新建 DSH 根会话的绝对工作目录；未提供时使用插件 `workspace`。插件把外部 `session_id` 与解析后的目录一次性记录为 `byclaw/session-workspace`，并在恢复时拒绝冲突目录。业务指令保持为未经改写的 `source: user` 消息。每个 Agent 的第一次获准步骤会另行收到 `plugin:byclaw-context` 消息，其中只声明继承的会话工作区；插件通过持久消息检查避免恢复后重复注入。AgentTeams 团员继承该命名空间，但保留各自独立的 DSH 会话 ID；用户消息不再重复包装 workspace。
 - 每条 `AskAgent` 入站会按顺序输出终端可见的生命周期日志：收到命令及其标识；继承的 ByClaw 会话命名空间、DSH ID、实际 `cwd` 和根／委派作用域；新建、恢复或继续会话；不含密钥的模型解析信息（`sourceModelId`、provider、model、protocol 和解析来源）；携带完整指令的任务启动。数字员工根 Agent、专家团根 Agent 或普通委派模板子 Agent 完成组合时，另输出一条日志，只列出该模板自己的 Skill 名称和本地路径。插件不会额外写入登录授权、Redis 密码、模型端点或模型密钥；由于完整指令可能包含敏感内容，运维方必须把这些日志作为对话数据管理。
-- DSH 文本块 -> `answerDelta`
-- DSH reasoning 块 -> `reasoningLogDelta`
+- DSH 根 Agent 或入站直达 Agent 的正文 -> `answerDelta/1002`；委派子 Agent 的正文以 `reasoningLogDelta/1002` 挂在自己的状态节点下，不混入最终答案
+- DSH 思考过程与注入上下文 -> `reasoningLogDelta/1001`
+- 工具开始与结果 -> `reasoningLogDelta/3015` 的状态化工具卡，使用 `objectType=tool_call` 和同一个工具调用消息 ID；JSON 内容遵循当前 FE 的 `title/input/output/status/description` 结构
 - `ask_user_question` -> `contentType=3014` 的结构化 ByClaw 提问卡片；`ResumeCommand` 回填并唤醒原调用
 - `todo_write` 与兼容工具名 `task_plan` -> `todo/write` 会话事件 -> `contentType=2008` 的任务计划卡片；计划事件使用 `<入站消息ID>:plan`，并把入站消息 ID 作为 `parent_message_id`
-- 子 Agent 创建、运行、等待、完成或失败 -> 带 DSH 会话 ID、父会话 ID 和委派深度的状态事件
+- 子 Agent 创建、运行、等待、完成或失败 -> `reasoningLogDelta/3009` 的状态化节点；子 Agent 的思考、正文和工具事件都挂在该节点下
+- DSH 会话 ID、父会话 ID、委派深度、原始事件类型和序号只进入诊断 metadata，不再占用工具卡展示内容
 - Worker 终态只发送完成信号，不重复发送已经流式输出的最终正文
 
 ## 配置
@@ -100,7 +102,7 @@ info 日志会记录监听频道、keyspace／poll 模式、授权信号、资�
         baseUrl: 'http://123.56.153.229:8080'
 ```
 
-Redis 连接只读取标准 `REDIS_*` 环境变量。默认 ByClaw BE 地址为 `http://123.56.153.229:8080`，可通过 `baseUrl` 覆盖。Redis 模型模式还需提供用于解密 ByClaw 模型鉴权的 `BAIYING_AIMODEL_AUTH_TOKEN_SM4_KEY_HEX`。如需运行态只使用本地 DSH 模型路由，请设置 `BYCLAW_REDIS_MODEL_ENABLED=false`，并同时配置 `provider` 和 `model`。DSH 启动器会读取启动工作目录下的 `.env`；已导出的进程环境变量优先于该文件和 `$DSH_HOME/.env`。
+Redis 连接只读取标准 `REDIS_*` 环境变量。`BYCLAW_DSH_BASE_URL` 优先于插件的 `baseUrl`；两者都未设置时，默认 ByClaw BE 地址为 `http://123.56.153.229:8080`。Redis 模型模式还需提供用于解密 ByClaw 模型鉴权的 `BAIYING_AIMODEL_AUTH_TOKEN_SM4_KEY_HEX`。如需运行态只使用本地 DSH 模型路由，请设置 `BYCLAW_REDIS_MODEL_ENABLED=false`，并同时配置 `provider` 和 `model`。DSH 启动器会读取启动工作目录下的 `.env`；已导出的进程环境变量优先于该文件和 `$DSH_HOME/.env`。
 
 可在运行时设置可选变量 `BYCLAW_DSH_WEB_AUTH_TOKEN`，让 DSH Web 在容器重启后使用同一个启动 token。适配器只把根路径的 `?token=` 交换翻译为 DSH 内部随机 token；签名 cookie、Host/Origin 信任校验以及所有 API/WebSocket 鉴权仍由 DSH 原实现负责。镜像不内置默认值；显式空值会让插件启动失败。请通过容器环境或未跟踪的 `.env` 注入。
 

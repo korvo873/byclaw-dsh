@@ -91,7 +91,7 @@ async function streamUntilTerminal(traceId) {
       if (text) {
         const card = parseJsonObject(text)
         const contentType = String(event.data?.contentType ?? event.data?.content_type ?? '')
-        if (event.metadata?.dsh_scope === 'child' && (contentType === '3009' || contentType === '1002')) {
+        if (event.metadata?.session_scope === 'child' && (contentType === '3009' || contentType === '1002')) {
           sessionCards.push({ contentType, text, metadata: event.metadata })
         }
         if (card !== undefined && contentType === '3015' && card.eventKind === 'agent-teams/snapshot') {

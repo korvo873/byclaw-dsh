@@ -57,7 +57,7 @@ export function taskPlanCard(todos: ReadonlyArray<{ content: string; status: str
           input_files: [],
           output_path: '',
           tool: '',
-          tool_metadata: { dsh_status: todo.status },
+          tool_metadata: { status: todo.status },
           updateDesc: '',
           updateTag: false,
           invalidErrors: [],
@@ -130,6 +130,7 @@ export type DshSessionEventKind =
   | 'plan'
   | 'tool.call'
   | 'tool.result'
+  | 'agent-teams/snapshot'
   | 'session.error'
 
 export type DshSessionStatus = 'ready' | 'running' | 'waiting' | 'completed' | 'failed'
@@ -180,29 +181,13 @@ export function selectOwnedTeamSnapshots<T extends TeamSnapshotLike>(
   return snapshots.filter(snapshot => ownsCaptain(snapshot.captainSessionId))
 }
 
-/** Serialize one complete AgentTeams snapshot with a content-stable identity. */
-export function dshAgentTeamsSnapshotCard<T extends TeamSnapshotLike>(
-  team: T,
-  options: { archived: boolean; capturedAt: string },
-): { contentType: '3016'; content: string; eventId: string } {
+/** Build a content-stable identity for one AgentTeams snapshot. */
+export function dshAgentTeamsSnapshotEventId<T extends TeamSnapshotLike>(team: T, archived: boolean): string {
   const digest = createHash('sha256')
-    .update(JSON.stringify({ archived: options.archived, team }))
+    .update(JSON.stringify({ archived, team }))
     .digest('hex')
     .slice(0, 24)
-  const eventId = `${team.teamId}:${digest}`
-  return {
-    contentType: '3016',
-    eventId,
-    content: JSON.stringify({
-      source: 'DSH',
-      schemaVersion: 1,
-      eventId,
-      sessionId: team.captainSessionId,
-      archived: options.archived,
-      capturedAt: options.capturedAt,
-      team,
-    }),
-  }
+  return `${team.teamId}:${digest}`
 }
 
 function stringArray(value: unknown): string[] | undefined {

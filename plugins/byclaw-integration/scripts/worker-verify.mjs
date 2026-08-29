@@ -17,22 +17,59 @@ import * as dshProtocol from '../lib/protocol.js'
 import {
   ByClawAsyncTeamGate,
   ByClawDshSessionRuntime,
+  ByClawSnapshotRefreshQueue,
   byClawCommandSessionRoute,
   byClawRootPresentationLabel,
   byClawRootSessionId,
   dshChildLabel,
   describeDshSessionEvent,
   installByClawTaskPlanTool,
+  isQuiescentTeamSnapshot,
+  loadPersistedSessionById,
+  sessionEventProjection,
   shouldForwardIncrementalChunk,
   resolveRootSessionOpenMode,
   turnFailureMessage,
 } from '../lib/session-runtime.js'
 import { Config, resolveWorkerAgentTypes, rosterPrompt } from '../lib/index.js'
+import * as integrationPlugin from '../lib/index.js'
 import * as templateRuntime from '../lib/template-runtime.js'
 import { superviseWorker } from '../lib/worker-runtime.js'
 import { ByClawDshCommandHandler } from '../lib/worker.js'
 
 if (BYCLAW_DSH_AGENT_TYPE !== 'BYCLAW_DSH') throw new Error('worker type is not BYCLAW_DSH')
+
+let snapshotRefreshes = 0
+const snapshotQueue = new ByClawSnapshotRefreshQueue(async () => {
+  snapshotRefreshes += 1
+}, 5)
+for (let index = 0; index < 100; index += 1) snapshotQueue.request()
+await snapshotQueue.flush()
+assert.equal(snapshotRefreshes, 1, 'burst snapshot requests must coalesce into one filesystem scan')
+assert.equal(
+  typeof integrationPlugin.resolveByClawBaseUrl,
+  'function',
+  'ByClaw integration must expose base URL environment resolution',
+)
+assert.equal(
+  integrationPlugin.resolveByClawBaseUrl('http://configured.test', {
+    BYCLAW_DSH_BASE_URL: ' http://environment.test ',
+  }),
+  'http://environment.test',
+  'BYCLAW_DSH_BASE_URL must override the plugin config',
+)
+assert.equal(
+  integrationPlugin.resolveByClawBaseUrl(' http://configured.test ', {
+    BYCLAW_DSH_BASE_URL: '   ',
+  }),
+  'http://configured.test',
+  'a blank BYCLAW_DSH_BASE_URL must fall back to plugin config',
+)
+assert.equal(
+  integrationPlugin.resolveByClawBaseUrl(undefined, {}),
+  integrationPlugin.DEFAULT_BYCLAW_BE_BASE_URL,
+  'missing environment and plugin config must fall back to the public default',
+)
 const defaultAgentTypes = resolveWorkerAgentTypes(undefined, 'adminvip')
 if (defaultAgentTypes.join(',') !== 'BYCLAW_DSH,BYCLAW_DSH_adminvip') {
   throw new Error(`default Worker AgentTypes changed: ${defaultAgentTypes.join(',')}`)
@@ -143,7 +180,7 @@ if (card.contentType !== '2008'
   || typeof cardPayload.planId !== 'string'
   || cardPayload.task_description !== 'DSH 任务计划'
   || cardPayload.steps?.[0]?.sub_steps?.[0]?.step_description !== '分析'
-  || cardPayload.steps?.[0]?.sub_steps?.[0]?.tool_metadata?.dsh_status !== 'in_progress') {
+  || cardPayload.steps?.[0]?.sub_steps?.[0]?.tool_metadata?.status !== 'in_progress') {
   throw new Error('todo plan card mapping failed')
 }
 const questionCard = askUserQuestionsCard([{
@@ -212,6 +249,61 @@ if (contextProjection?.eventKind !== 'context'
   || planProjection.plan?.[0]?.content !== '验证事件映射') {
   throw new Error('complete DSH context/Tool/plan event projection failed')
 }
+
+let persistenceListCalls = 0
+let persistenceLoadCalls = 0
+const missingSession = await loadPersistedSessionById({
+  async list() {
+    persistenceListCalls += 1
+    throw new Error('full persistence listing must not run on the inbound hot path')
+  },
+  async load(id) {
+    persistenceLoadCalls += 1
+    assert.equal(id, 'stable-root-session')
+    const error = new Error(`session "${id}" not found`)
+    error.name = 'SessionPersistenceNotFoundError'
+    throw error
+  },
+}, 'stable-root-session')
+assert.equal(missingSession, undefined)
+assert.equal(persistenceLoadCalls, 1)
+assert.equal(persistenceListCalls, 0)
+
+const projectionContext = {
+  sessionId: 'root-session',
+  rootSessionId: 'root-session',
+  externalParentSessionId: 'byclaw-session',
+  scope: 'parent',
+  depth: 0,
+  sequence: '7:think',
+  eventKind: 'think',
+  status: 'running',
+  parentMessageId: 'root-message',
+  messageIdPrefix: 'root-message',
+}
+const nativeThinking = sessionEventProjection(
+  'think',
+  'running',
+  '思考',
+  { text: '正在分析事件顺序' },
+  projectionContext,
+)
+assert.equal(nativeThinking.options.eventType, 'reasoningLogDelta')
+assert.equal(nativeThinking.options.contentType, '1001')
+assert.equal(nativeThinking.options.objectType, undefined)
+assert.equal(nativeThinking.content, '正在分析事件顺序')
+
+const visibleContext = sessionEventProjection(
+  'context',
+  'running',
+  '上下文注入 · plugin:skill-loader',
+  { text: 'Loaded Spring Boot skills' },
+  { ...projectionContext, sequence: '2:context', eventKind: 'context' },
+)
+assert.equal(visibleContext.options.contentType, '3015')
+assert.equal(JSON.parse(visibleContext.content).output, 'Loaded Spring Boot skills')
+assert.equal(JSON.parse(visibleContext.content).source, 'runtime')
+assert.equal(JSON.parse(visibleContext.content).eventKind, 'context')
 const teamSnapshots = [
   { teamId: 'owned', name: '研发专家团', captainSessionId: 'child', members: [], tasks: [], messageCount: 0, captainInbox: [] },
   { teamId: 'other', name: '其他团队', captainSessionId: 'unrelated', members: [], tasks: [], messageCount: 0, captainInbox: [] },
@@ -220,25 +312,11 @@ const ownedSnapshots = dshProtocol.selectOwnedTeamSnapshots(teamSnapshots, sessi
 if (ownedSnapshots.length !== 1 || ownedSnapshots[0]?.teamId !== 'owned') {
   throw new Error('AgentTeams snapshots escaped the active DSH session tree')
 }
-const liveTeamCard = dshProtocol.dshAgentTeamsSnapshotCard(ownedSnapshots[0], {
-  archived: false, capturedAt: '2026-08-20T12:00:00.000Z',
-})
-const repeatedTeamCard = dshProtocol.dshAgentTeamsSnapshotCard(ownedSnapshots[0], {
-  archived: false, capturedAt: '2026-08-20T12:01:00.000Z',
-})
-const archivedTeamCard = dshProtocol.dshAgentTeamsSnapshotCard(ownedSnapshots[0], {
-  archived: true, capturedAt: '2026-08-20T12:02:00.000Z',
-})
-const liveTeamPayload = JSON.parse(liveTeamCard.content)
-const archivedTeamPayload = JSON.parse(archivedTeamCard.content)
-if (liveTeamCard.contentType !== '3016'
-  || liveTeamPayload.source !== 'DSH'
-  || liveTeamPayload.sessionId !== 'child'
-  || liveTeamPayload.team.teamId !== 'owned'
-  || liveTeamCard.eventId !== repeatedTeamCard.eventId
-  || archivedTeamCard.eventId === liveTeamCard.eventId
-  || archivedTeamPayload.archived !== true) {
-  throw new Error('AgentTeams snapshot card mapping or content dedupe identity failed')
+const liveTeamEventId = dshProtocol.dshAgentTeamsSnapshotEventId(ownedSnapshots[0], false)
+const repeatedTeamEventId = dshProtocol.dshAgentTeamsSnapshotEventId(ownedSnapshots[0], false)
+const archivedTeamEventId = dshProtocol.dshAgentTeamsSnapshotEventId(ownedSnapshots[0], true)
+if (liveTeamEventId !== repeatedTeamEventId || archivedTeamEventId === liveTeamEventId) {
+  throw new Error('AgentTeams snapshot content dedupe identity failed')
 }
 const routedCommand = new AskAgentCommand(new MessageHeader('route-message', 'child-session', 'route-trace', {
   userCode: 'adminvip',
@@ -301,6 +379,19 @@ asyncTeamGate.observe({ type: 'turn/end', data: { reason: { kind: 'completed' } 
 await asyncTeamGate.completion
 asyncTeamGate.assertHealthy()
 if (asyncTeamGate.waiting) throw new Error('deleted temporary team did not complete the ByClaw turn')
+
+const retainedTeamGate = new ByClawAsyncTeamGate()
+retainedTeamGate.observe({ type: 'tool/call', data: { name: 'agent_teams_start', callId: 'retained-start' } })
+retainedTeamGate.observe({ type: 'tool/result', data: { message: { content: [{
+  type: 'tool-result', toolCallId: 'retained-start', isError: false, content: [],
+}] } } })
+retainedTeamGate.completeRetainedTeamWhenQuiescent()
+await retainedTeamGate.completion
+retainedTeamGate.assertHealthy()
+if (retainedTeamGate.waiting) throw new Error('quiescent retained team kept the ByClaw turn pending')
+assert.equal(isQuiescentTeamSnapshot({ tasks: [] }), false)
+assert.equal(isQuiescentTeamSnapshot({ tasks: [{ status: 'completed' }, { state: 'failed' }] }), true)
+assert.equal(isQuiescentTeamSnapshot({ tasks: [{ status: 'completed' }, { state: 'running' }] }), false)
 
 const failedStartGate = new ByClawAsyncTeamGate()
 failedStartGate.observe({ type: 'tool/code-dispatch-start', data: {

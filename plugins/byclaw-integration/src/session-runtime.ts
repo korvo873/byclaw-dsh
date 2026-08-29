@@ -48,6 +48,8 @@ import {
 } from './protocol.ts'
 import {
   childOutputProjection,
+  detailProjection,
+  emitByClawProjection,
   reasoningProjection,
   sessionStatusProjection,
   teamSnapshotProjection,
@@ -82,9 +84,111 @@ interface ActiveTurn {
   workspace: string
   announcedChildren: Set<string>
   emittedTeamSnapshots: Set<string>
+  teamSnapshots?: ByClawSnapshotRefreshQueue
   bufferedReasoning: Map<string, { sequence: number; text: string }>
   bufferedChildOutput: Map<string, { sequence: number; text: string }>
+  answerChunks: AnswerChunkBatcher
   toolNames: Map<string, string>
+}
+
+/** Coalesces tiny model tokens before publishing them to the ByClaw Redis stream. */
+export class AnswerChunkBatcher {
+  private readonly buffers = new Map<string, string>()
+
+  constructor(private readonly minimumLength = 96) {
+    if (!Number.isInteger(minimumLength) || minimumLength < 1) {
+      throw new Error('minimumLength must be a positive integer')
+    }
+  }
+
+  append(key: string, text: string): string | undefined {
+    const buffered = `${this.buffers.get(key) ?? ''}${text}`
+    if (buffered.length < this.minimumLength) {
+      this.buffers.set(key, buffered)
+      return undefined
+    }
+    this.buffers.delete(key)
+    return buffered
+  }
+
+  flush(key: string): string | undefined {
+    const buffered = this.buffers.get(key)
+    this.buffers.delete(key)
+    return buffered === undefined || buffered === '' ? undefined : buffered
+  }
+
+  keys(): IterableIterator<string> {
+    return this.buffers.keys()
+  }
+}
+
+/**
+ * Refresh AgentTeams activity at a UI-like cadence without blocking the durable
+ * event projection queue. A burst of thousands of DSH events therefore causes
+ * one filesystem scan, while a long-running turn still receives periodic
+ * snapshots as new events arrive.
+ */
+export class ByClawSnapshotRefreshQueue {
+  private pending = false
+  private running: Promise<void> | undefined
+  private timer: ReturnType<typeof setTimeout> | undefined
+  private closed = false
+
+  constructor(
+    private readonly refresh: () => Promise<void>,
+    private readonly delayMs = 250,
+    private readonly onError: (error: unknown) => void = () => undefined,
+  ) {
+    if (!Number.isInteger(delayMs) || delayMs < 0) throw new Error('delayMs must be a non-negative integer')
+  }
+
+  request(): void {
+    if (this.closed) return
+    this.pending = true
+    this.schedule()
+  }
+
+  async flush(): Promise<void> {
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer)
+      this.timer = undefined
+    }
+    while (this.pending || this.running !== undefined) {
+      if (this.running !== undefined) await this.running
+      else await this.run()
+    }
+  }
+
+  dispose(): void {
+    this.closed = true
+    this.pending = false
+    if (this.timer !== undefined) clearTimeout(this.timer)
+    this.timer = undefined
+  }
+
+  private schedule(): void {
+    if (this.running !== undefined || this.timer !== undefined || !this.pending) return
+    this.timer = setTimeout(() => {
+      this.timer = undefined
+      void this.run()
+    }, this.delayMs)
+    this.timer.unref?.()
+  }
+
+  private run(): Promise<void> {
+    if (this.running !== undefined) return this.running
+    if (!this.pending || this.closed) return Promise.resolve()
+    this.pending = false
+    const operation = Promise.resolve()
+      .then(this.refresh)
+      .catch(error => { this.onError(error) })
+      .finally(() => {
+        if (this.running === operation) this.running = undefined
+        if (this.pending && !this.closed) this.schedule()
+      })
+    this.running = operation
+    return operation
+  }
 }
 
 interface RootHandle {
@@ -259,6 +363,26 @@ export interface DshEventDescription {
   plan?: ReadonlyArray<{ content: string; status: string }>
 }
 
+export interface PersistedSessionLookup {
+  load(id: SessionId): Promise<{
+    meta?: { cwd?: string }
+    events: readonly SessionEvent[]
+  }>
+}
+
+/** Load one deterministic session directly without listing every persisted DSH session. */
+export async function loadPersistedSessionById(
+  persistence: PersistedSessionLookup,
+  sessionId: SessionId,
+): Promise<Awaited<ReturnType<PersistedSessionLookup['load']>> | undefined> {
+  try {
+    return await persistence.load(sessionId)
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'SessionPersistenceNotFoundError') return undefined
+    throw error
+  }
+}
+
 /** Convert a durable DSH event to its ByClaw transcript meaning, omitting internal lifecycle records. */
 export function describeDshSessionEvent(event: SessionEvent): DshEventDescription | undefined {
   if (event.type === 'user/message') {
@@ -267,23 +391,25 @@ export function describeDshSessionEvent(event: SessionEvent): DshEventDescriptio
     const sourceName = source['kind'] === 'plugin' && typeof source['plugin'] === 'string'
       ? `plugin:${source['plugin']}`
       : String(source['kind'] ?? 'injected')
-    const text = contentText(event.data.content)
     return {
-      eventKind: 'context', status: 'running', summary: `上下文注入 · ${sourceName}`,
-      contextSource: sourceName, ...(text === '' ? {} : { text }),
+      eventKind: 'context', status: 'completed', summary: `上下文注入 · ${sourceName}`,
+      text: contentText(event.data.content),
+      contextSource: sourceName,
     }
   }
   if (event.type === 'request/context') {
     const contextSource = `${event.data.provider}/${event.data.model}`
     return {
-      eventKind: 'context', status: 'running', summary: `模型上下文 · ${contextSource}`,
-      contextSource, text: JSON.stringify(event.data),
+      eventKind: 'context', status: 'completed', summary: `模型上下文 · ${contextSource}`,
+      text: JSON.stringify(event.data),
+      contextSource,
     }
   }
   if (event.type === 'request/header') {
     return {
-      eventKind: 'context', status: 'running', summary: `请求配置 · ${event.data.reason}`,
-      contextSource: 'request/header', text: JSON.stringify(event.data.header),
+      eventKind: 'context', status: 'completed', summary: `请求配置 · ${event.data.reason}`,
+      text: JSON.stringify(event.data),
+      contextSource: 'request/header',
     }
   }
   if (event.type === 'tool/call') {
@@ -327,6 +453,40 @@ export function describeDshSessionEvent(event: SessionEvent): DshEventDescriptio
     }
   }
   return undefined
+}
+
+/** Map one semantic DSH event onto the matching native ByClaw event component. */
+export function sessionEventProjection(
+  eventKind: DshSessionEventKind,
+  status: DshSessionStatus,
+  summary: string,
+  details: Omit<DshEventDescription, 'eventKind' | 'status' | 'summary'>,
+  context: DshProjectionContext,
+): ByClawProjection {
+  if (eventKind === 'tool.call' || eventKind === 'tool.result') {
+    return toolCallProjection({
+      phase: eventKind === 'tool.call' ? 'start' : details.isError === true ? 'error' : 'success',
+      toolCallId: details.toolCallId ?? `${context.messageIdPrefix ?? context.parentMessageId}:tool:${context.sequence}`,
+      toolName: details.toolName,
+      ...(eventKind === 'tool.call' && details.arguments !== undefined ? { input: details.arguments } : {}),
+      ...(eventKind === 'tool.result' && details.result !== undefined ? { output: details.result } : {}),
+      description: summary,
+    }, context)
+  }
+  if (eventKind === 'think') {
+    return reasoningProjection(details.text ?? summary, context)
+  }
+  if (eventKind === 'context' || eventKind === 'plan') {
+    return detailProjection({
+      title: summary,
+      ...(details.text !== undefined
+        ? { detail: details.text }
+        : details.plan !== undefined
+          ? { detail: details.plan }
+          : {}),
+    }, context)
+  }
+  return reasoningProjection(details.text ?? summary, context)
 }
 
 /** Return the latest completed turn's failure message, when DSH ended in error. */
@@ -420,6 +580,12 @@ export class ByClawAsyncTeamGate {
 
   cancel(reason: string): void {
     this.finish(new Error(`ByClaw async team/template gate was cancelled: ${reason}`))
+  }
+
+  completeRetainedTeamWhenQuiescent(): void {
+    if (!this.waiting || this.kind !== 'team' || this.startCallId !== undefined || !this.teamActive) return
+    this.teamActive = false
+    this.finish()
   }
 
   private begin(kind: 'team' | 'template'): void {
@@ -527,6 +693,17 @@ export class ByClawAsyncTeamGate {
       this.finish(new Error(`ByClaw ${this.kind ?? 'async'} turn failed: ${event.data.reason.error.message}`))
     } else if (completed) this.finish()
   }
+}
+
+const TERMINAL_TEAM_TASK_STATES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'stopped', 'error'])
+
+export function isQuiescentTeamSnapshot(snapshot: Pick<TeamActivitySnapshot, 'tasks'>): boolean {
+  const tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : []
+  return tasks.length > 0 && tasks.every(task => {
+    const value = task as unknown as Record<string, unknown>
+    const state = String(value['state'] ?? value['status'] ?? '').toLowerCase()
+    return TERMINAL_TEAM_TASK_STATES.has(state)
+  })
 }
 
 /** Owns DSH root handles and maps their event logs onto one by-framework turn. */
@@ -649,10 +826,17 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
       workspace: sessionWorkspace.cwd,
       announcedChildren: new Set(),
       emittedTeamSnapshots: new Set(),
+      teamSnapshots: undefined,
       bufferedReasoning: new Map(),
       bufferedChildOutput: new Map(),
+      answerChunks: new AnswerChunkBatcher(),
       toolNames: new Map(),
     }
+    turn.teamSnapshots = new ByClawSnapshotRefreshQueue(
+      () => this.emitTeamSnapshots(turn),
+      250,
+      error => this.ctx.logger.warn(`byclaw-dsh AgentTeams snapshot refresh failed: ${String(error)}`),
+    )
     this.active.set(String(rootAgent.id), turn)
     try {
       const agent = directTarget === undefined
@@ -677,6 +861,13 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
         dshSessionId: route.externalRootSessionId,
       }
     } finally {
+      try {
+        await this.flushTurnBuffers(turn, rootAgent.session)
+        await turn.teamSnapshots?.flush()
+      } catch (error) {
+        console.error('[byclaw-dsh] flush buffered projections on turn cleanup failed', error)
+      }
+      turn.teamSnapshots?.dispose()
       this.active.delete(String(rootAgent.id))
       this.messageAgents.delete(command.header.messageId)
     }
@@ -809,7 +1000,15 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
                 await this.options.emitter.emitState(
                   active.context.sessionId,
                   active.context.traceId,
-                  { state: card.content, metadata: event.metadata },
+                  {
+                    state: card.content,
+                    metadata: {
+                      ...event.metadata,
+                      event_source: 'runtime',
+                      event_kind: 'interaction.request',
+                      session_scope: 'parent',
+                    },
+                  },
                   {
                     sourceAgentType: this.options.sourceAgentType,
                     messageId: active.rootMessageId,
@@ -833,10 +1032,7 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     }
     const live = this.ctx.agents.get(sessionId)
     const persistence = (this.ctx as Context & {
-      sessionPersistence: {
-        list(): Promise<ReadonlyArray<{ id: string; cwd?: string }>>
-        load(id: SessionId): Promise<{ events: readonly SessionEvent[] }>
-      }
+      sessionPersistence: PersistedSessionLookup
     }).sessionPersistence
     if (live !== undefined) {
       assertStableSessionCwd(externalRootSessionId, live.session.header.cwd, route.cwd)
@@ -846,12 +1042,11 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
         sessionId: externalRootSessionId,
       })
     }
-    const persistedHeader = live === undefined
-      ? (await persistence.list()).find(header => header.id === sessionId)
+    const persistedSession = live === undefined
+      ? await loadPersistedSessionById(persistence, sessionId)
       : undefined
-    if (persistedHeader !== undefined) {
-      assertStableSessionCwd(externalRootSessionId, persistedHeader.cwd, route.cwd)
-      const persistedSession = await persistence.load(sessionId)
+    if (persistedSession !== undefined) {
+      assertStableSessionCwd(externalRootSessionId, persistedSession.meta?.cwd, route.cwd)
       const legacyBinding = isLegacyByClawRootBindingCandidate(persistedSession.events)
       if (legacyBinding && requestedBinding.kind === 'template') {
         throw new Error(`ByClaw legacy session ${externalRootSessionId} cannot safely infer a template binding; start a new ByClaw session`)
@@ -860,7 +1055,7 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
         assertByClawRootBinding(persistedSession.events, requestedBinding, externalRootSessionId)
       }
     }
-    const persisted = persistedHeader !== undefined
+    const persisted = persistedSession !== undefined
     const mode = resolveRootSessionOpenMode(live !== undefined, persisted)
     const handle = mode === 'reuse'
       ? { agent: live as Agent, dispose: () => Promise.resolve() }
@@ -905,7 +1100,8 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
         })
       } else if (response && shouldForwardIncrementalChunk(chunk.kind)) {
         turn.answer += chunk.text
-        await turn.context.emitChunk(chunk.text, EventType.ANSWER_DELTA)
+        const ready = turn.answerChunks.append(key, chunk.text)
+        if (ready !== undefined) await this.emitAnswerChunk(turn, session, event.seq, ready)
       } else {
         const buffered = turn.bufferedChildOutput.get(key)
         turn.bufferedChildOutput.set(key, {
@@ -936,8 +1132,9 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
       turn.toolNames.set(`${session.id}:${event.data.subCallId}`, event.data.name)
     }
 
-    if (event.type === 'todo/write' && response) await this.emitPlan(turn, event.data.todos)
-    const description = describeDshSessionEvent(event)
+    const projectedPlan = event.type === 'todo/write' && response
+    if (projectedPlan) await this.emitPlan(turn, event.data.todos)
+    const description = projectedPlan ? undefined : describeDshSessionEvent(event)
     if (description !== undefined) {
       const { eventKind, status, summary, ...details } = description
       const toolName = details.toolName ?? (details.toolCallId === undefined
@@ -950,7 +1147,7 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     }
 
     if (!root) await this.forwardChildLifecycle(turn, session, event)
-    await this.emitTeamSnapshots(turn)
+    turn.teamSnapshots?.request()
   }
 
   private activeTurnFor(session: Session): ActiveTurn | undefined {
@@ -1001,6 +1198,10 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     stepNumber: number,
   ): Promise<void> {
     const key = `${session.id}:${turnNumber}:${stepNumber}`
+    const answer = turn.answerChunks.flush(key)
+    if (answer !== undefined) {
+      await this.emitAnswerChunk(turn, session, `${turnNumber}:${stepNumber}:flush`, answer)
+    }
     const reasoning = turn.bufferedReasoning.get(key)
     if (reasoning !== undefined) {
       turn.bufferedReasoning.delete(key)
@@ -1017,9 +1218,45 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     }
   }
 
+  private async emitAnswerChunk(
+    turn: ActiveTurn,
+    session: Session,
+    sequence: number | string,
+    content: string,
+  ): Promise<void> {
+    const root = String(session.id) === turn.rootSessionId
+    const presentation = root
+      ? { label: turn.rootLabel, task: undefined }
+      : dshChildPresentation(session, this.options.agentTemplateDir)
+    await this.options.emitter.emitChunk(turn.context.sessionId, turn.context.traceId, {
+      content,
+      metadata: {
+        event_source: 'dsh',
+        event_kind: 'assistant.chunk',
+        session_scope: root ? 'parent' : 'child',
+        external_session_id: String(session.id),
+        ...(root ? {} : { external_parent_session_id: String(session.header.parentSession) }),
+        external_root_session_id: turn.rootSessionId,
+        host_session_id: turn.context.sessionId,
+        delegation_depth: session.header.delegationDepth ?? 0,
+        event_sequence: String(sequence),
+        session_status: 'running',
+        ...(root ? {} : { child_name: presentation.label }),
+        ...(root || presentation.task === undefined ? {} : { child_task: presentation.task }),
+      },
+    }, {
+      eventType: EventType.ANSWER_DELTA,
+      contentType: '1002' as never,
+      sourceAgentType: this.options.sourceAgentType,
+      messageId: root ? turn.rootMessageId : `dsh:${session.id}`,
+      parentMessageId: root ? turn.rootMessageId : `dsh:${session.id}`,
+    })
+  }
+
   private async flushSessionBuffers(turn: ActiveTurn, session: Session): Promise<void> {
     const prefix = `${session.id}:`
     const keys = new Set([
+      ...[...turn.answerChunks.keys()].filter(key => key.startsWith(prefix)),
       ...[...turn.bufferedReasoning.keys()].filter(key => key.startsWith(prefix)),
       ...[...turn.bufferedChildOutput.keys()].filter(key => key.startsWith(prefix)),
     ])
@@ -1028,6 +1265,23 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
       const step = Number(parts.pop())
       const turnNumber = Number(parts.pop())
       await this.flushStepBuffers(turn, session, turnNumber, step)
+    }
+  }
+
+  private async flushTurnBuffers(turn: ActiveTurn, rootSession: Session): Promise<void> {
+    const keys = [
+      ...turn.answerChunks.keys(),
+      ...turn.bufferedReasoning.keys(),
+      ...turn.bufferedChildOutput.keys(),
+    ]
+    const sessionIds = new Set(keys
+      .map(key => key.split(':').slice(0, -2).join(':'))
+      .filter((sessionId): sessionId is string => sessionId !== undefined && sessionId !== ''))
+    for (const sessionId of sessionIds) {
+      const session = sessionId === String(rootSession.id)
+        ? rootSession
+        : this.ctx.root.sessions.get(SessionId(sessionId))
+      if (session !== undefined) await this.flushSessionBuffers(turn, session)
     }
   }
 
@@ -1080,49 +1334,38 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
         title: `${presentation.label} · ${summary}`,
         status,
       }, projectionContext(parentMessageId))
-    } else if (eventKind === 'tool.call' || eventKind === 'tool.result') {
-      projection = toolCallProjection({
-        phase: eventKind === 'tool.call' ? 'start' : details.isError === true ? 'error' : 'success',
-        toolCallId: details.toolCallId ?? `${messageId}:tool:${sequence}`,
-        toolName: details.toolName,
-        ...(eventKind === 'tool.call' && details.arguments !== undefined ? { input: details.arguments } : {}),
-        ...(eventKind === 'tool.result' && details.result !== undefined ? { output: details.result } : {}),
-        description: summary,
-      }, projectionContext(messageId))
     } else if (eventKind === 'session.output') {
       projection = childOutputProjection(details.text ?? summary, projectionContext(messageId))
     } else {
-      const text = eventKind === 'context' && details.text !== undefined
-        ? `${summary}\n${details.text}`
-        : details.text ?? summary
-      projection = reasoningProjection(text, projectionContext(messageId))
+      projection = sessionEventProjection(eventKind, status, summary, details, projectionContext(messageId))
     }
-    await this.options.emitter.emitChunk(
+    await emitByClawProjection(
+      this.options.emitter,
       turn.context.sessionId,
       turn.context.traceId,
-      projection.content,
-      {
-        ...projection.options,
-        sourceAgentType: this.options.sourceAgentType,
-      },
+      projection,
+      this.options.sourceAgentType,
     )
   }
 
   private async emitPlan(turn: ActiveTurn, todos: TodoItem[]): Promise<void> {
     const card = taskPlanCard(todos)
-    await this.options.emitter.emitChunk(turn.context.sessionId, turn.context.traceId, card.content, {
+    await this.options.emitter.emitChunk(turn.context.sessionId, turn.context.traceId, {
+      content: card.content,
+      metadata: {
+        event_source: 'dsh',
+        event_kind: 'todo/write',
+        session_scope: 'parent',
+        external_session_id: turn.rootSessionId,
+        external_root_session_id: turn.rootSessionId,
+        host_session_id: turn.context.sessionId,
+      },
+    }, {
       eventType: EventType.ANSWER_DELTA,
       contentType: card.contentType as never,
       sourceAgentType: this.options.sourceAgentType,
       messageId: `${turn.rootMessageId}:plan`,
       parentMessageId: turn.rootMessageId,
-      metadata: {
-        dsh_event: 'todo/write',
-        dsh_scope: 'parent',
-        dsh_session_id: turn.rootSessionId,
-        root_dsh_session_id: turn.rootSessionId,
-        external_parent_session_id: turn.context.sessionId,
-      },
     })
   }
 
@@ -1146,7 +1389,8 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
       return
     }
     for (const [snapshots, isArchived] of [[live, false], [archived, true]] as const) {
-      for (const team of selectOwnedTeamSnapshots(snapshots, ownsCaptain)) {
+      const ownedSnapshots = selectOwnedTeamSnapshots(snapshots, ownsCaptain)
+      for (const team of ownedSnapshots) {
         const eventId = dshAgentTeamsSnapshotEventId(team, isArchived)
         if (turn.emittedTeamSnapshots.has(eventId)) continue
         turn.emittedTeamSnapshots.add(eventId)
@@ -1166,15 +1410,16 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
           parentMessageId: turn.rootMessageId,
           messageIdPrefix: turn.rootMessageId,
         })
-        await this.options.emitter.emitChunk(
+        await emitByClawProjection(
+          this.options.emitter,
           turn.context.sessionId,
           turn.context.traceId,
-          projection.content,
-          {
-            ...projection.options,
-            sourceAgentType: this.options.sourceAgentType,
-          },
+          projection,
+          this.options.sourceAgentType,
         )
+      }
+      if (!isArchived && ownedSnapshots.length > 0 && ownedSnapshots.every(isQuiescentTeamSnapshot)) {
+        turn.teamGate.completeRetainedTeamWhenQuiescent()
       }
     }
   }

@@ -1,6 +1,6 @@
 /** Native ByClaw frontend projections for DSH session activity. */
 
-import { EventType } from '@byclaw/by-framework'
+import { EventType, type GatewayDataEmitter } from '@byclaw/by-framework'
 import type { DshSessionEventKind, DshSessionStatus } from './protocol.ts'
 
 export type DshProjectionScope = 'parent' | 'child' | 'team'
@@ -37,17 +37,38 @@ export interface ByClawProjection {
   options: ByClawProjectionOptions
 }
 
+/**
+ * GatewayDataEmitter ignores options.metadata when its event argument is a string.
+ * Always carry projection metadata on an object event so DSH scope survives the SDK wire format.
+ */
+export async function emitByClawProjection(
+  emitter: Pick<GatewayDataEmitter, 'emitChunk'>,
+  sessionId: string,
+  traceId: string,
+  projection: ByClawProjection,
+  sourceAgentType: string,
+): Promise<void> {
+  await emitter.emitChunk(sessionId, traceId, {
+    content: projection.content,
+    metadata: projection.options.metadata,
+  }, {
+    ...projection.options,
+    sourceAgentType,
+  })
+}
+
 function metadata(context: DshProjectionContext): Record<string, unknown> {
   return {
-    dsh_event: context.eventKind,
-    dsh_scope: context.scope,
-    dsh_session_id: context.sessionId,
-    ...(context.parentSessionId === undefined ? {} : { parent_dsh_session_id: context.parentSessionId }),
-    root_dsh_session_id: context.rootSessionId,
-    external_parent_session_id: context.externalParentSessionId,
+    event_source: 'dsh',
+    event_kind: context.eventKind,
+    session_scope: context.scope,
+    external_session_id: context.sessionId,
+    ...(context.parentSessionId === undefined ? {} : { external_parent_session_id: context.parentSessionId }),
+    external_root_session_id: context.rootSessionId,
+    host_session_id: context.externalParentSessionId,
     delegation_depth: context.depth,
-    dsh_sequence: String(context.sequence),
-    ...(context.status === undefined ? {} : { dsh_status: context.status }),
+    event_sequence: String(context.sequence),
+    ...(context.status === undefined ? {} : { session_status: context.status }),
     ...(context.childName === undefined ? {} : { child_name: context.childName }),
     ...(context.childTask === undefined ? {} : { child_task: context.childTask }),
   }
@@ -92,6 +113,8 @@ export interface DshToolProjection {
   input?: unknown
   output?: unknown
   description?: string
+  source?: string
+  eventKind?: string
 }
 
 function toolStatus(phase: DshToolProjection['phase']): '_START_' | '_DONE_' | '_ERROR_' {
@@ -109,6 +132,8 @@ export function toolCallProjection(tool: DshToolProjection, context: DshProjecti
       ...(tool.output === undefined ? {} : { output: tool.output }),
       status,
       ...(tool.description === undefined ? {} : { description: tool.description }),
+      ...(tool.source === undefined ? {} : { source: tool.source }),
+      ...(tool.eventKind === undefined ? {} : { eventKind: tool.eventKind }),
     }),
     options: {
       eventType: EventType.REASONING_LOG_DELTA,
@@ -120,6 +145,23 @@ export function toolCallProjection(tool: DshToolProjection, context: DshProjecti
       metadata: metadata(context),
     },
   }
+}
+
+export interface DshDetailProjection {
+  title: string
+  detail?: unknown
+}
+
+/** Render verbose diagnostic detail as a completed, collapsed ByClaw-native row. */
+export function detailProjection(detail: DshDetailProjection, context: DshProjectionContext): ByClawProjection {
+  return toolCallProjection({
+    phase: 'success',
+    toolCallId: eventMessageId(context),
+    toolName: detail.title,
+    source: 'runtime',
+    eventKind: context.eventKind,
+    ...(detail.detail === undefined || detail.detail === '' ? {} : { output: detail.detail }),
+  }, context)
 }
 
 export interface DshStatusProjection {
@@ -167,7 +209,7 @@ export function teamSnapshotProjection(
       capturedAt: snapshot.capturedAt,
     }),
     options: {
-      eventType: EventType.REASONING_LOG_DELTA,
+      eventType: EventType.ANSWER_DELTA,
       contentType: '3015',
       objectType: 'tool_call',
       messageId: `${context.messageIdPrefix ?? `dsh:${context.sessionId}`}:team:${team.teamId}`,
