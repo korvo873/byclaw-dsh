@@ -259,7 +259,6 @@ export function registerAgentTemplateRuntime(ctx: Context, config: {
 
   const runtime: ByClawTemplateInstanceRuntime = {
     async prepareRoot(templateId) {
-      await config.beforeInstantiate?.()
       return withCatalogRead(async () => {
         const template = await readAgentTemplate(config.catalogDir, templateId)
         if (template === undefined) throw new Error(`agent template "${templateId}" was not found`)

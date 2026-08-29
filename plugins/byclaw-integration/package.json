@@ -28,7 +28,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "verify": "pnpm build && node --import tsx/esm scripts/inbound-routing-verify.mjs && node --import tsx/esm scripts/live-options-verify.mjs && node --import tsx/esm scripts/web-auth-verify.mjs && node scripts/session-context-verify.mjs && node scripts/resources-verify.mjs && node scripts/model-runtime-verify.mjs && node scripts/catalog-skill-verify.mjs && node scripts/resource-watch-verify.mjs && node scripts/worker-verify.mjs"
+    "verify": "pnpm build && node --import tsx/esm scripts/inbound-routing-verify.mjs && node --import tsx/esm scripts/template-runtime-hotpath-verify.mjs && node --import tsx/esm scripts/live-options-verify.mjs && node --import tsx/esm scripts/web-auth-verify.mjs && node scripts/session-context-verify.mjs && node scripts/resources-verify.mjs && node scripts/model-runtime-verify.mjs && node scripts/catalog-skill-verify.mjs && node scripts/resource-watch-verify.mjs && node scripts/worker-verify.mjs && node scripts/presentation-verify.mjs && node scripts/emitter-metadata-verify.mjs && node scripts/answer-chunk-batching-verify.mjs"
   },
   "dependencies": {
     "@byclaw/by-framework": "1.5.1",
